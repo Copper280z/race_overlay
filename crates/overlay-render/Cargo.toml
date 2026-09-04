@@ -1,0 +1,14 @@
+[package]
+name = "overlay-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+overlay-core = { path = "../overlay-core" }
+serde.workspace = true
+serde_json.workspace = true
+tiny-skia.workspace = true
+
+[dev-dependencies]
+image.workspace = true

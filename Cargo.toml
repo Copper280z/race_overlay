@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "app",
+    "crates/overlay-core",
+    "crates/overlay-media",
+    "crates/overlay-render",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+csv = "1.4"
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu", "wayland", "x11"] }
+egui = "0.36"
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"
+num-complex = "0.4"
+ordered-float = { version = "5", features = ["serde"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+rustfft = "6.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.23"
+thiserror = "2.0"
+tiny-skia = "0.12"
+uuid = { version = "1.18", features = ["v4", "serde"] }

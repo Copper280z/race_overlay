@@ -1,0 +1,19 @@
+[package]
+name = "race-overlay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+eframe.workspace = true
+egui.workspace = true
+log.workspace = true
+overlay-core = { path = "../crates/overlay-core" }
+overlay-media = { path = "../crates/overlay-media" }
+overlay-render = { path = "../crates/overlay-render" }
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

@@ -1,0 +1,34 @@
+# Rust build output
+/target/
+
+# Python scratch tooling
+__pycache__/
+*.py[cod]
+
+# OS and editor debris
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+*~
+
+# Raw camera recordings, video exports, and interrupted encodes. These are
+# intentionally broad: media belongs beside a working copy, not in Git.
+*.insv
+*.lrv
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.part.*
+
+# Local editor projects contain machine-specific media paths.
+*.race-overlay.json
+
+# Proprietary logger captures remain local unless deliberately promoted to a
+# small, redistributable test fixture later.
+*.xrk
+
+# Renderer/example output
+widget-gallery.png
