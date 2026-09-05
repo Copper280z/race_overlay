@@ -126,6 +126,10 @@ pub struct ExportConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectV1 {
     pub video_path: PathBuf,
+    /// Project-wide visual theme. The renderer owns the schema so new palette
+    /// fields can be added without changing the stable project envelope.
+    #[serde(default)]
+    pub appearance: Value,
     #[serde(default)]
     pub sources: Vec<SourceConfig>,
     #[serde(default)]
@@ -141,6 +145,10 @@ impl ProjectV1 {
     pub fn new(video_path: impl Into<PathBuf>) -> Self {
         Self {
             video_path: video_path.into(),
+            // Keep the canonical default explicit in newly-created projects.
+            // Individual palette values remain optional and are resolved by
+            // the renderer from this preset.
+            appearance: serde_json::json!({"preset": "race_dark"}),
             sources: vec![],
             camera_calibration: CameraCalibration::default(),
             widgets: vec![],
@@ -266,6 +274,22 @@ mod tests {
                 width: 1.,
                 height: 0.
             }
+        );
+    }
+
+    #[test]
+    fn appearance_round_trips_as_project_owned_json() {
+        let mut project = ProjectV1::new("video.mp4");
+        project.appearance = serde_json::json!({
+            "preset": "light",
+            "accent": [10, 120, 200],
+            "future_palette_field": {"kept": true}
+        });
+        let encoded = serde_json::to_value(ProjectDocument::from(project)).unwrap();
+        let decoded: ProjectDocument = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.v1().appearance["future_palette_field"]["kept"],
+            true
         );
     }
 }

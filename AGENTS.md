@@ -43,6 +43,15 @@ The workspace is divided into:
 - The default unit system is configurable, and compatible units can be
   overridden per widget without merely relabeling unconverted values.
 - Widget foreground opacity and background opacity are independent settings.
+- Appearance is project-level and saved with the project. It provides Race
+  Dark, Light, Transparent, and Custom presets plus semantic accent, text,
+  panel, muted, positive, warning, and critical colors. Widgets inherit the
+  project palette by default and may opt into per-widget color overrides.
+  Corner roundness follows the same global/inherited or per-widget override
+  model.
+  Color alpha is not used as a second opacity control: RGB colors and
+  foreground/background opacity remain separate. Preview and export must use
+  the same resolved palette.
 - GPS track maps draw one representative path for multi-lap recordings rather
   than stacking every lap. They also support point-to-point/autocross routes,
   playhead-captured start and finish locations, manual full-lap selection,

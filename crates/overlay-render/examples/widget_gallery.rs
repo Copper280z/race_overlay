@@ -1,5 +1,7 @@
 use overlay_core::NormalizedRect;
-use overlay_render::{DatasetContext, RenderOptions, RenderSize, Renderer, Rgba, Widget};
+use overlay_render::{
+    AppearancePalette, DatasetContext, RenderOptions, RenderSize, Renderer, Rgba, Widget,
+};
 
 fn widget(
     kind: &str,
@@ -21,9 +23,13 @@ fn widget(
 }
 
 fn main() {
-    let output = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "widget-gallery.png".into());
+    let mut args = std::env::args().skip(1);
+    let output = args.next().unwrap_or_else(|| "widget-gallery.png".into());
+    let palette = match args.next().as_deref() {
+        Some("light") => AppearancePalette::light(),
+        Some("transparent") => AppearancePalette::transparent(),
+        _ => AppearancePalette::race_dark(),
+    };
     let mut data = DatasetContext::default();
     for (slot, value) in [
         ("rpm", 12_750.0),
@@ -83,7 +89,7 @@ fn main() {
     );
     track.latitude_slot = "latitude".into();
     track.longitude_slot = "longitude".into();
-    let widgets = vec![
+    let mut widgets = vec![
         widget(
             "shift_lights",
             "rpm",
@@ -159,6 +165,18 @@ fn main() {
         ),
         g,
     ];
+    for widget in &mut widgets {
+        widget.accent = palette.accent;
+        widget.text_color = palette.text;
+        widget.background = palette.background;
+        widget.muted = palette.muted;
+        widget.positive = palette.positive;
+        widget.warning = palette.warning;
+        widget.critical = palette.critical;
+        widget.opacity = palette.foreground_opacity;
+        widget.background_opacity = palette.background_opacity;
+        widget.corner_radius = palette.corner_radius;
+    }
     let rendered = Renderer::default().render(
         &widgets,
         RenderSize::new(1920, 1080),

@@ -119,9 +119,123 @@ impl Serialize for Rgba {
 }
 impl<'de> Deserialize<'de> for Rgba {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let v = <[u8; 4]>::deserialize(d)?;
-        Ok(Self(v[0], v[1], v[2], v[3]))
+        let v = Vec::<u8>::deserialize(d)?;
+        match v.as_slice() {
+            [red, green, blue] => Ok(Self(*red, *green, *blue, 255)),
+            [red, green, blue, alpha] => Ok(Self(*red, *green, *blue, *alpha)),
+            _ => Err(serde::de::Error::custom(
+                "an RGBA color must contain three (RGB) or four (RGBA) channels",
+            )),
+        }
     }
+}
+
+/// Fully resolved project appearance.  Values are intentionally public so a
+/// host with custom widgets can use the exact same semantic palette as the
+/// built-in renderer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AppearancePalette {
+    pub accent: Rgba,
+    pub text: Rgba,
+    pub background: Rgba,
+    pub muted: Rgba,
+    pub positive: Rgba,
+    pub warning: Rgba,
+    pub critical: Rgba,
+    pub foreground_opacity: f32,
+    pub background_opacity: f32,
+    /// Fraction of the smaller widget dimension, in the range 0..=0.5.
+    pub corner_radius: f32,
+}
+
+impl AppearancePalette {
+    pub const fn race_dark() -> Self {
+        Self {
+            accent: Rgba(0, 218, 255, 255),
+            text: Rgba(255, 255, 255, 255),
+            background: Rgba(10, 15, 22, 255),
+            muted: Rgba(100, 110, 125, 255),
+            positive: Rgba(60, 225, 133, 255),
+            warning: Rgba(247, 176, 50, 255),
+            critical: Rgba(245, 77, 59, 255),
+            foreground_opacity: 0.92,
+            background_opacity: 0.92,
+            corner_radius: 0.12,
+        }
+    }
+    pub const fn light() -> Self {
+        Self {
+            accent: Rgba(0, 120, 190, 255),
+            text: Rgba(24, 32, 44, 255),
+            background: Rgba(242, 246, 250, 255),
+            muted: Rgba(103, 116, 133, 255),
+            positive: Rgba(20, 150, 85, 255),
+            warning: Rgba(206, 128, 0, 255),
+            critical: Rgba(202, 54, 45, 255),
+            foreground_opacity: 0.92,
+            background_opacity: 0.92,
+            corner_radius: 0.12,
+        }
+    }
+    pub const fn transparent() -> Self {
+        Self {
+            // Keep RGB meaningful for a user who later raises the opacity;
+            // opacity, rather than a hidden per-color alpha, is the style
+            // control for newly-authored projects.
+            background_opacity: 0.,
+            ..Self::race_dark()
+        }
+    }
+}
+impl Default for AppearancePalette {
+    fn default() -> Self {
+        Self::race_dark()
+    }
+}
+
+/// Resolve a schema-free project `appearance` JSON object into the semantic
+/// palette used by the renderer. `preset` may be `race_dark`/`current`,
+/// `light`, or `transparent`; explicit values always win over the preset.
+/// `panel` is accepted as an alias for `background`.
+pub fn resolve_appearance(appearance: &Value) -> AppearancePalette {
+    let preset = appearance
+        .get("preset")
+        .and_then(Value::as_str)
+        .unwrap_or("race_dark")
+        .trim()
+        .to_ascii_lowercase();
+    let mut palette = match preset.as_str() {
+        "light" => AppearancePalette::light(),
+        "transparent" => AppearancePalette::transparent(),
+        "current" | "race_dark" | "race-dark" | "dark" => AppearancePalette::race_dark(),
+        _ => AppearancePalette::race_dark(),
+    };
+    macro_rules! color_value {
+        ($field:ident, $key:literal) => {
+            if let Some(value) = color(appearance, $key) {
+                palette.$field = value;
+            }
+        };
+    }
+    color_value!(accent, "accent");
+    color_value!(text, "text");
+    palette.background = color(appearance, "background")
+        .or_else(|| color(appearance, "panel"))
+        .unwrap_or(palette.background);
+    color_value!(muted, "muted");
+    color_value!(positive, "positive");
+    color_value!(warning, "warning");
+    color_value!(critical, "critical");
+    if let Some(value) = number(appearance, "foreground_opacity") {
+        palette.foreground_opacity = value.clamp(0., 1.) as f32;
+    }
+    if let Some(value) = number(appearance, "background_opacity") {
+        palette.background_opacity = value.clamp(0., 1.) as f32;
+    }
+    if let Some(value) = number(appearance, "corner_radius") {
+        palette.corner_radius = value.clamp(0., 0.5) as f32;
+    }
+    palette
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +255,16 @@ pub struct Widget {
     pub accent: Rgba,
     #[serde(default = "default_text")]
     pub text_color: Rgba,
+    #[serde(default = "default_muted")]
+    pub muted: Rgba,
+    #[serde(default = "default_positive")]
+    pub positive: Rgba,
+    #[serde(default = "default_warning")]
+    pub warning: Rgba,
+    #[serde(default = "default_critical")]
+    pub critical: Rgba,
+    #[serde(default = "default_corner_radius")]
+    pub corner_radius: f32,
     #[serde(default)]
     pub label: String,
     #[serde(default)]
@@ -171,16 +295,31 @@ pub struct Widget {
     core_bindings: Option<Vec<ChannelBinding>>,
 }
 fn default_opacity() -> f32 {
-    1.
+    AppearancePalette::race_dark().foreground_opacity
 }
 fn default_background() -> Rgba {
-    Rgba(12, 16, 24, 190)
+    AppearancePalette::race_dark().background
 }
 fn default_accent() -> Rgba {
-    Rgba(70, 210, 255, 255)
+    AppearancePalette::race_dark().accent
 }
 fn default_text() -> Rgba {
     Rgba::WHITE
+}
+fn default_muted() -> Rgba {
+    AppearancePalette::race_dark().muted
+}
+fn default_positive() -> Rgba {
+    AppearancePalette::race_dark().positive
+}
+fn default_warning() -> Rgba {
+    AppearancePalette::race_dark().warning
+}
+fn default_critical() -> Rgba {
+    AppearancePalette::race_dark().critical
+}
+fn default_corner_radius() -> f32 {
+    AppearancePalette::race_dark().corner_radius
 }
 impl Default for Widget {
     fn default() -> Self {
@@ -188,11 +327,16 @@ impl Default for Widget {
             id: String::new(),
             type_id: "numeric".into(),
             rect: NormalizedRect::default(),
-            opacity: 1.,
-            background_opacity: 1.,
+            opacity: AppearancePalette::race_dark().foreground_opacity,
+            background_opacity: AppearancePalette::race_dark().background_opacity,
             background: default_background(),
             accent: default_accent(),
             text_color: default_text(),
+            muted: default_muted(),
+            positive: default_positive(),
+            warning: default_warning(),
+            critical: default_critical(),
+            corner_radius: default_corner_radius(),
             label: String::new(),
             unit: String::new(),
             format: String::new(),
@@ -485,7 +629,16 @@ impl Renderer {
         let bg = w.background.with_alpha(w.background_opacity.clamp(0., 1.));
         let ac = w.accent.with_alpha(op);
         let tx = w.text_color.with_alpha(op);
-        fill_round(pm, r, (r.width.min(r.height) as f32 * 0.12).max(2.), bg);
+        let muted = w.muted.with_alpha(op);
+        let positive = w.positive.with_alpha(op);
+        let warning = w.warning.with_alpha(op);
+        let critical = w.critical.with_alpha(op);
+        fill_round(
+            pm,
+            r,
+            r.width.min(r.height) as f32 * w.corner_radius.clamp(0., 0.5),
+            bg,
+        );
         let at = source + w.source_offset;
         match kind {
             "numeric" => paint_numeric(
@@ -503,7 +656,7 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 ac,
                 tx,
-                op,
+                muted,
             ),
             "radial" => paint_radial(
                 pm,
@@ -512,7 +665,7 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 ac,
                 tx,
-                op,
+                muted,
             ),
             "xy_dot" => paint_xy(
                 pm,
@@ -522,7 +675,7 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.y_slot, "y"), at),
                 ac,
                 tx,
-                op,
+                muted,
             ),
             "tachometer" => paint_tachometer(
                 pm,
@@ -531,7 +684,9 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 ac,
                 tx,
-                op,
+                muted,
+                warning,
+                critical,
             ),
             "temperature" => paint_temperature(
                 pm,
@@ -540,7 +695,9 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 ac,
                 tx,
-                op,
+                muted,
+                warning,
+                critical,
             ),
             "lap_timer" => paint_lap_timer(
                 pm,
@@ -555,7 +712,9 @@ impl Renderer {
                 r,
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 tx,
-                op,
+                muted,
+                positive,
+                critical,
             ),
             "shift_lights" => paint_shift_lights(
                 pm,
@@ -564,7 +723,9 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 ac,
                 tx,
-                op,
+                muted,
+                warning,
+                critical,
             ),
             "center_bar" => paint_center_bar(
                 pm,
@@ -573,7 +734,7 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 ac,
                 tx,
-                op,
+                muted,
             ),
             "gear" => paint_gear(
                 pm,
@@ -582,7 +743,6 @@ impl Renderer {
                 resolver.resolve(slot_or(&w.value_slot, "value"), at),
                 ac,
                 tx,
-                op,
             ),
             "track_map" => {
                 let latitude_slot = slot_or(&w.latitude_slot, "latitude");
@@ -604,6 +764,9 @@ impl Renderer {
                     resolver.resolve(latitude_slot, at),
                     resolver.resolve(longitude_slot, at),
                     ac,
+                    tx,
+                    positive,
+                    critical,
                     op,
                 );
             }
@@ -943,7 +1106,22 @@ pub fn prepare_project_widgets<D: ProjectValueResolver>(
     widgets: &[WidgetConfig],
     data: &D,
 ) -> PreparedProjectWidgets {
-    let mut converted: Vec<Widget> = widgets.iter().map(widget_from_core).collect();
+    prepare_project_widgets_with_appearance(widgets, data, &Value::Null)
+}
+
+/// Convert project widgets and resolve their inherited project appearance once.
+/// The returned value is suitable for repeated export-frame rendering: both
+/// static geometry and all palette decisions are retained in it.
+pub fn prepare_project_widgets_with_appearance<D: ProjectValueResolver>(
+    widgets: &[WidgetConfig],
+    data: &D,
+    appearance: &Value,
+) -> PreparedProjectWidgets {
+    let palette = resolve_appearance(appearance);
+    let mut converted: Vec<Widget> = widgets
+        .iter()
+        .map(|widget| widget_from_core_with_appearance(widget, palette))
+        .collect();
     // The low-level renderer resolves slots by name. Give each project widget
     // a private key so two widgets both using `value` cannot steal one another's
     // channel binding.
@@ -1008,7 +1186,20 @@ pub fn render_project_widgets<D: ProjectValueResolver>(
     video_time: f64,
     options: RenderOptions,
 ) -> RenderResult {
-    let prepared = prepare_project_widgets(widgets, data);
+    render_project_widgets_with_appearance(widgets, data, &Value::Null, size, video_time, options)
+}
+
+/// Render core project widgets with an explicit project-wide appearance JSON.
+/// Existing [`render_project_widgets`] callers retain the `race_dark` default.
+pub fn render_project_widgets_with_appearance<D: ProjectValueResolver>(
+    widgets: &[WidgetConfig],
+    data: &D,
+    appearance: &Value,
+    size: RenderSize,
+    video_time: f64,
+    options: RenderOptions,
+) -> RenderResult {
+    let prepared = prepare_project_widgets_with_appearance(widgets, data, appearance);
     render_prepared_project_widgets(&prepared, data, size, video_time, options)
 }
 
@@ -1042,7 +1233,10 @@ impl Widget {
     }
 }
 
-fn widget_from_core(w: &WidgetConfig) -> Widget {
+/// Resolve a project widget against a semantic palette. This is public for
+/// custom project-level renderers; normal callers should use the themed
+/// prepare/render helpers so the palette is resolved only once.
+pub fn widget_from_core_with_appearance(w: &WidgetConfig, palette: AppearancePalette) -> Widget {
     let mut out = Widget {
         id: w.id.0.to_string(),
         type_id: match w.kind.as_str() {
@@ -1095,23 +1289,10 @@ fn widget_from_core(w: &WidgetConfig) -> Widget {
     };
     let style = &w.style;
     let settings = &w.settings;
-    out.opacity = number(style, "opacity")
-        .or_else(|| number(settings, "opacity"))
-        .unwrap_or(1.) as f32;
-    // Falling back to the former all-widget opacity preserves the appearance
-    // of projects saved before background opacity became independent.
-    out.background_opacity = number(style, "background_opacity")
-        .or_else(|| number(settings, "background_opacity"))
-        .unwrap_or(f64::from(out.opacity)) as f32;
-    out.background = color(style, "background")
-        .or_else(|| color(style, "background_color"))
-        .unwrap_or(default_background());
-    out.accent = color(style, "accent")
-        .or_else(|| color(style, "accent_color"))
-        .unwrap_or(default_accent());
-    out.text_color = color(style, "text")
-        .or_else(|| color(style, "text_color"))
-        .unwrap_or(default_text());
+    let inherit_appearance = boolean(style, "inherit_appearance")
+        .or_else(|| boolean(settings, "inherit_appearance"))
+        .unwrap_or(true);
+    apply_appearance(&mut out, style, settings, palette, inherit_appearance);
     out.label = string(style, "label")
         .or_else(|| string(settings, "label"))
         .unwrap_or_default();
@@ -1131,6 +1312,69 @@ fn number(v: &Value, key: &str) -> Option<f64> {
 }
 fn string(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+fn boolean(v: &Value, key: &str) -> Option<bool> {
+    v.get(key).and_then(Value::as_bool)
+}
+
+fn style_color(style: &Value, settings: &Value, key: &str, aliases: &[&str]) -> Option<Rgba> {
+    color(style, key)
+        .or_else(|| aliases.iter().find_map(|alias| color(style, alias)))
+        .or_else(|| color(settings, key))
+        .or_else(|| aliases.iter().find_map(|alias| color(settings, alias)))
+}
+
+fn style_number(style: &Value, settings: &Value, key: &str, aliases: &[&str]) -> Option<f64> {
+    number(style, key)
+        .or_else(|| aliases.iter().find_map(|alias| number(style, alias)))
+        .or_else(|| number(settings, key))
+        .or_else(|| aliases.iter().find_map(|alias| number(settings, alias)))
+}
+
+fn apply_appearance(
+    widget: &mut Widget,
+    style: &Value,
+    settings: &Value,
+    palette: AppearancePalette,
+    inherit: bool,
+) {
+    widget.accent = palette.accent;
+    widget.text_color = palette.text;
+    widget.background = palette.background;
+    widget.muted = palette.muted;
+    widget.positive = palette.positive;
+    widget.warning = palette.warning;
+    widget.critical = palette.critical;
+    widget.opacity = palette.foreground_opacity;
+    widget.background_opacity = palette.background_opacity;
+    widget.corner_radius = palette.corner_radius;
+    if inherit {
+        return;
+    }
+    widget.accent =
+        style_color(style, settings, "accent", &["accent_color"]).unwrap_or(widget.accent);
+    widget.text_color =
+        style_color(style, settings, "text", &["text_color"]).unwrap_or(widget.text_color);
+    widget.background = style_color(
+        style,
+        settings,
+        "background",
+        &["background_color", "panel"],
+    )
+    .unwrap_or(widget.background);
+    widget.muted = style_color(style, settings, "muted", &[]).unwrap_or(widget.muted);
+    widget.positive = style_color(style, settings, "positive", &[]).unwrap_or(widget.positive);
+    widget.warning = style_color(style, settings, "warning", &[]).unwrap_or(widget.warning);
+    widget.critical = style_color(style, settings, "critical", &[]).unwrap_or(widget.critical);
+    widget.opacity = style_number(style, settings, "foreground_opacity", &["opacity"])
+        .unwrap_or(widget.opacity as f64)
+        .clamp(0., 1.) as f32;
+    widget.background_opacity = style_number(style, settings, "background_opacity", &[])
+        .unwrap_or(widget.background_opacity as f64)
+        .clamp(0., 1.) as f32;
+    widget.corner_radius = style_number(style, settings, "corner_radius", &[])
+        .unwrap_or(widget.corner_radius as f64)
+        .clamp(0., 0.5) as f32;
 }
 fn color(v: &Value, key: &str) -> Option<Rgba> {
     let a = v.get(key)?.as_array()?;
@@ -1608,6 +1852,9 @@ fn paint_track_map(
     current_latitude: Option<f64>,
     current_longitude: Option<f64>,
     accent: Rgba,
+    text: Rgba,
+    positive: Rgba,
+    critical: Rgba,
     opacity: f32,
 ) {
     if points.len() < 2 {
@@ -1658,7 +1905,10 @@ fn paint_track_map(
         )
     };
     let pixels: Vec<_> = rotated.into_iter().map(to_pixel).collect();
-    let line_color = map.line_color.unwrap_or(accent).with_alpha(opacity);
+    let line_color = map
+        .line_color
+        .map(|color| color.with_alpha(opacity))
+        .unwrap_or(accent);
     let line_width = map
         .line_width
         .unwrap_or((r.width.min(r.height) as f32 * 0.025).clamp(1.25, 6.0));
@@ -1699,16 +1949,16 @@ fn paint_track_map(
             pm,
             pixels[0],
             map.start_color
-                .unwrap_or(Rgba(71, 214, 126, 255))
-                .with_alpha(opacity),
+                .map(|color| color.with_alpha(opacity))
+                .unwrap_or(positive),
             marker * 0.65,
         );
         draw_marker(
             pm,
             *pixels.last().unwrap(),
             map.finish_color
-                .unwrap_or(Rgba(244, 95, 78, 255))
-                .with_alpha(opacity),
+                .map(|color| color.with_alpha(opacity))
+                .unwrap_or(critical),
             marker * 0.65,
         );
     }
@@ -1738,8 +1988,8 @@ fn paint_track_map(
             pm,
             to_pixel(point),
             map.position_color
-                .unwrap_or(Rgba::WHITE)
-                .with_alpha(opacity),
+                .map(|color| color.with_alpha(opacity))
+                .unwrap_or(text),
             marker,
         );
     }
@@ -1772,7 +2022,7 @@ fn paint_bar(
     v: Option<f64>,
     accent: Rgba,
     text: Rgba,
-    opacity: f32,
+    muted: Rgba,
 ) {
     let pad = (r.width.min(r.height) as f32 * 0.14).max(3.);
     let bx = r.x as f32 + pad;
@@ -1785,7 +2035,7 @@ fn paint_bar(
             pm,
             PixelRect::new(bx as i32, by as i32, bw as u32, bh as u32),
             bh / 2.,
-            Rgba(80, 90, 105, (180. * opacity) as u8),
+            muted.with_alpha(0.70),
         );
         fill_round(
             pm,
@@ -1798,7 +2048,7 @@ fn paint_bar(
             pm,
             PixelRect::new(bx as i32, by as i32, bw as u32, bh as u32),
             bh / 2.,
-            Rgba(80, 90, 105, (90. * opacity) as u8),
+            muted.with_alpha(0.35),
         )
     }
     let label = join_label(
@@ -1823,7 +2073,7 @@ fn paint_radial(
     v: Option<f64>,
     accent: Rgba,
     text: Rgba,
-    opacity: f32,
+    muted: Rgba,
 ) {
     let cx = r.x as f32 + r.width as f32 * 0.5;
     let cy = r.y as f32 + r.height as f32 * 0.56;
@@ -1835,12 +2085,7 @@ fn paint_radial(
         let a = start + sweep * i as f32 / 64.;
         pts.push((cx + rad * a.cos(), cy + rad * a.sin()))
     }
-    stroke_line(
-        pm,
-        &pts,
-        Rgba(90, 100, 115, (180. * opacity) as u8),
-        (rad * 0.085).max(1.),
-    );
+    stroke_line(pm, &pts, muted.with_alpha(0.70), (rad * 0.085).max(1.));
     if let Some(value) = v {
         let progress = norm(value, w.min, w.max);
         let n = (progress * 64.).round() as usize;
@@ -1878,7 +2123,7 @@ fn paint_radial(
                 (cx + inner * angle.cos(), cy + inner * angle.sin()),
                 (cx + outer * angle.cos(), cy + outer * angle.sin()),
             ],
-            Rgba(202, 212, 225, (185. * opacity) as u8),
+            muted.with_alpha(0.72),
             (rad * 0.018).max(1.),
         );
     }
@@ -1926,12 +2171,12 @@ fn paint_xy(
     y: Option<f64>,
     accent: Rgba,
     text: Rgba,
-    opacity: f32,
+    muted: Rgba,
 ) {
     let cx = r.x as f32 + r.width as f32 * 0.5;
     let cy = r.y as f32 + r.height as f32 * 0.55;
     let rad = (r.width.min(r.height) as f32 * 0.33).max(2.);
-    let grid = Rgba(100, 110, 125, (145. * opacity) as u8);
+    let grid = muted.with_alpha(0.57);
     for scale in [0.5_f32, 1.] {
         let mut ring = Vec::with_capacity(49);
         for i in 0..=48 {
@@ -1982,7 +2227,7 @@ fn paint_xy(
                 (d * 2.) as u32,
             ),
             d,
-            Rgba(130, 140, 150, (90. * opacity) as u8),
+            muted.with_alpha(0.35),
         )
     }
     if !w.label.is_empty() {
@@ -1997,15 +2242,7 @@ fn paint_xy(
     }
 }
 
-fn paint_gear(
-    pm: &mut Pixmap,
-    w: &Widget,
-    r: PixelRect,
-    v: Option<f64>,
-    accent: Rgba,
-    text: Rgba,
-    opacity: f32,
-) {
+fn paint_gear(pm: &mut Pixmap, w: &Widget, r: PixelRect, v: Option<f64>, accent: Rgba, text: Rgba) {
     let cx = r.x as f32 + r.width as f32 * 0.5;
     let label = if w.label.is_empty() { "GEAR" } else { &w.label };
     draw_centered_text(
@@ -2036,7 +2273,7 @@ fn paint_gear(
             (cx - line_width * 0.5, r.y as f32 + r.height as f32 * 0.88),
             (cx + line_width * 0.5, r.y as f32 + r.height as f32 * 0.88),
         ],
-        accent.with_alpha(0.75 * opacity),
+        accent.with_alpha(0.75),
         (r.height as f32 * 0.025).max(1.),
     );
 }
@@ -2044,6 +2281,7 @@ fn paint_gear(
 /// A broad, half-round RPM dial. The last 15% of the scale is deliberately
 /// reserved for the shift zone so it remains useful on both a small HUD and a
 /// full-width 4K overlay.
+#[allow(clippy::too_many_arguments)]
 fn paint_tachometer(
     pm: &mut Pixmap,
     w: &Widget,
@@ -2051,7 +2289,9 @@ fn paint_tachometer(
     v: Option<f64>,
     accent: Rgba,
     text: Rgba,
-    opacity: f32,
+    muted: Rgba,
+    warning: Rgba,
+    critical: Rgba,
 ) {
     let cx = r.x as f32 + r.width as f32 * 0.5;
     let cy = r.y as f32 + r.height as f32 * 0.57;
@@ -2063,7 +2303,7 @@ fn paint_tachometer(
     let lo = w.min.unwrap_or(0.);
     let hi = w.max.unwrap_or(15_000.).max(lo + 1.);
     let value_t = v.map(|value| ((value - lo) / (hi - lo)).clamp(0., 1.) as f32);
-    let base = Rgba(93, 105, 122, (170. * opacity) as u8);
+    let base = muted.with_alpha(0.67);
 
     let mut arc = Vec::with_capacity(73);
     for i in 0..=72 {
@@ -2075,7 +2315,7 @@ fn paint_tachometer(
     stroke_line(
         pm,
         &arc[shift_start..],
-        Rgba(245, 77, 59, (235. * opacity) as u8),
+        critical.with_alpha(0.92),
         (radius * 0.085).max(1.),
     );
     for i in 0..=8 {
@@ -2084,9 +2324,9 @@ fn paint_tachometer(
         let outer = radius * 1.05;
         let inner = radius * if i % 2 == 0 { 0.84 } else { 0.89 };
         let tick = if t >= 0.85 {
-            Rgba(245, 170, 54, (240. * opacity) as u8)
+            warning.with_alpha(0.94)
         } else {
-            Rgba(190, 202, 216, (190. * opacity) as u8)
+            muted.with_alpha(0.75)
         };
         stroke_line(
             pm,
@@ -2130,11 +2370,12 @@ fn paint_tachometer(
         cx,
         r.y as f32 + r.height as f32 * 0.84,
         join_label(caption, "", &w.unit).trim(),
-        Rgba(196, 207, 220, (210. * opacity) as u8),
+        muted.with_alpha(0.82),
         (r.height as f32 * 0.09).clamp(5., 15.),
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_temperature(
     pm: &mut Pixmap,
     w: &Widget,
@@ -2142,16 +2383,18 @@ fn paint_temperature(
     v: Option<f64>,
     accent: Rgba,
     text: Rgba,
-    opacity: f32,
+    muted: Rgba,
+    warning: Rgba,
+    critical: Rgba,
 ) {
     let lo = w.min.unwrap_or(40.);
     let hi = w.max.unwrap_or(120.).max(lo + 1.);
     let t = v.map(|value| ((value - lo) / (hi - lo)).clamp(0., 1.) as f32);
     let pad = (r.width.min(r.height) as f32 * 0.12).max(3.);
     let compact = r.width as f32 > r.height as f32 * 1.45;
-    let track = Rgba(80, 91, 108, (165. * opacity) as u8);
-    let hot = Rgba(244, 82, 59, (245. * opacity) as u8);
-    let warm = Rgba(248, 176, 57, (245. * opacity) as u8);
+    let track = muted.with_alpha(0.65);
+    let hot = critical.with_alpha(0.96);
+    let warm = warning.with_alpha(0.96);
     let value = v
         .map(|value| format_value(value, &w.format))
         .unwrap_or_else(|| "-".into());
@@ -2263,7 +2506,7 @@ fn paint_temperature(
                 x + width * 1.7,
                 y + height * 0.69,
                 &w.unit,
-                Rgba(196, 207, 220, (210. * opacity) as u8),
+                muted.with_alpha(0.82),
                 (r.height as f32 * 0.09).clamp(5., 12.),
             );
         }
@@ -2302,13 +2545,16 @@ fn paint_lap_timer(pm: &mut Pixmap, w: &Widget, r: PixelRect, v: Option<f64>, te
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_delta(
     pm: &mut Pixmap,
     w: &Widget,
     r: PixelRect,
     v: Option<f64>,
     text: Rgba,
-    opacity: f32,
+    muted: Rgba,
+    positive: Rgba,
+    critical: Rgba,
 ) {
     let cx = r.x as f32 + r.width as f32 * 0.5;
     let label = if w.label.is_empty() {
@@ -2325,21 +2571,9 @@ fn paint_delta(
         (r.height as f32 * 0.12).clamp(5., 16.),
     );
     let (sign, body, color) = match v {
-        Some(value) if value < 0. => (
-            '-',
-            format!("{:.3}", value.abs()),
-            Rgba(60, 225, 133, (255. * opacity) as u8),
-        ),
-        Some(value) => (
-            '+',
-            format!("{:.3}", value),
-            Rgba(249, 85, 75, (255. * opacity) as u8),
-        ),
-        None => (
-            ' ',
-            "-.---".into(),
-            Rgba(160, 171, 185, (180. * opacity) as u8),
-        ),
+        Some(value) if value < 0. => ('-', format!("{:.3}", value.abs()), positive),
+        Some(value) => ('+', format!("{:.3}", value), critical),
+        None => (' ', "-.---".into(), muted.with_alpha(0.70)),
     };
     let size = (r.height as f32 * 0.29).clamp(8., 38.);
     let body_width = text_width(&body, size);
@@ -2390,6 +2624,7 @@ fn paint_delta(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_shift_lights(
     pm: &mut Pixmap,
     w: &Widget,
@@ -2397,7 +2632,9 @@ fn paint_shift_lights(
     v: Option<f64>,
     accent: Rgba,
     text: Rgba,
-    opacity: f32,
+    _muted: Rgba,
+    warning: Rgba,
+    critical: Rgba,
 ) {
     const LIGHTS: usize = 10;
     let lo = w.min.unwrap_or(6_000.);
@@ -2414,9 +2651,9 @@ fn paint_shift_lights(
     let lit = (progress * LIGHTS as f32).ceil() as usize;
     for i in 0..LIGHTS {
         let base = if i >= 8 {
-            Rgba(245, 72, 58, (255. * opacity) as u8)
+            critical
         } else if i >= 6 {
-            Rgba(247, 176, 50, (255. * opacity) as u8)
+            warning
         } else {
             accent
         };
@@ -2466,7 +2703,7 @@ fn paint_center_bar(
     v: Option<f64>,
     accent: Rgba,
     text: Rgba,
-    opacity: f32,
+    muted: Rgba,
 ) {
     let pad = (r.width.min(r.height) as f32 * 0.12).max(3.);
     let x = r.x as f32 + pad;
@@ -2484,12 +2721,12 @@ fn paint_center_bar(
         pm,
         PixelRect::new(x as i32, y as i32, width as u32, height as u32),
         height / 2.,
-        Rgba(80, 91, 108, (170. * opacity) as u8),
+        muted.with_alpha(0.67),
     );
     stroke_line(
         pm,
         &[(center, y - height * 0.32), (center, y + height * 1.32)],
-        Rgba(214, 222, 232, (200. * opacity) as u8),
+        muted.with_alpha(0.79),
         1.,
     );
     if let Some(value) = v {
@@ -2497,7 +2734,7 @@ fn paint_center_bar(
         let left = center.min(endpoint);
         let bar_width = (center - endpoint).abs().max(1.);
         let color = if value < 0. {
-            Rgba(83, 192, 255, (255. * opacity) as u8)
+            accent.with_alpha(0.82)
         } else {
             accent
         };
@@ -2797,7 +3034,7 @@ mod tests {
     }
 
     #[test]
-    fn old_project_opacity_remains_the_background_fallback() {
+    fn widget_overrides_require_opt_out_of_global_appearance() {
         let mut config = WidgetConfig {
             id: WidgetId::new(),
             kind: "numeric".into(),
@@ -2807,14 +3044,93 @@ mod tests {
             settings: serde_json::json!({}),
             unknown: Default::default(),
         };
-        let widget = widget_from_core(&config);
-        assert!((widget.opacity - 0.4).abs() < f32::EPSILON);
-        assert!((widget.background_opacity - 0.4).abs() < f32::EPSILON);
+        let palette = AppearancePalette::light();
+        let widget = widget_from_core_with_appearance(&config, palette);
+        assert_eq!(widget.opacity, palette.foreground_opacity);
+        assert_eq!(widget.background_opacity, palette.background_opacity);
 
+        config.style["inherit_appearance"] = serde_json::json!(false);
         config.style["background_opacity"] = serde_json::json!(0.8);
-        let widget = widget_from_core(&config);
+        let widget = widget_from_core_with_appearance(&config, palette);
         assert!((widget.opacity - 0.4).abs() < f32::EPSILON);
         assert!((widget.background_opacity - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn appearance_presets_and_explicit_palette_values_resolve_predictably() {
+        let dark = resolve_appearance(&serde_json::json!({"preset": "race_dark"}));
+        assert_eq!(dark, AppearancePalette::race_dark());
+
+        let transparent = resolve_appearance(&serde_json::json!({"preset": "transparent"}));
+        assert_eq!(
+            transparent.background,
+            AppearancePalette::race_dark().background
+        );
+        assert_eq!(transparent.background_opacity, 0.);
+
+        let custom = resolve_appearance(&serde_json::json!({
+            "preset": "light",
+            "accent": [1, 2, 3],
+            "panel": [4, 5, 6, 7],
+            "foreground_opacity": 0.6,
+            "background_opacity": 0.4,
+            "corner_radius": 0.25,
+        }));
+        assert_eq!(custom.accent, Rgba(1, 2, 3, 255));
+        assert_eq!(custom.background, Rgba(4, 5, 6, 7));
+        assert_eq!(custom.foreground_opacity, 0.6);
+        assert_eq!(custom.background_opacity, 0.4);
+        assert_eq!(custom.corner_radius, 0.25);
+    }
+
+    #[test]
+    fn project_theme_is_captured_by_prepared_widgets_and_widget_overrides_win() {
+        let mut inherited = WidgetConfig {
+            id: WidgetId::new(),
+            kind: "temperature".into(),
+            rect: NormalizedRect::default(),
+            bindings: Vec::new(),
+            style: serde_json::json!({"accent": [200, 1, 2]}),
+            settings: Value::Null,
+            unknown: Default::default(),
+        };
+        let palette_json = serde_json::json!({
+            "preset": "race_dark",
+            "accent": [3, 4, 5],
+            "muted": [6, 7, 8],
+            "positive": [9, 10, 11],
+            "warning": [12, 13, 14],
+            "critical": [15, 16, 17],
+        });
+        let palette = resolve_appearance(&palette_json);
+        let from_global = widget_from_core_with_appearance(&inherited, palette);
+        assert_eq!(from_global.accent, palette.accent);
+        assert_eq!(from_global.warning, palette.warning);
+
+        inherited.style = serde_json::json!({
+            "inherit_appearance": false,
+            "accent": [200, 1, 2],
+            "warning": [21, 22, 23],
+            "foreground_opacity": 0.5,
+            "background_opacity": 0.25,
+            "corner_radius": 0.05,
+        });
+        let overridden = widget_from_core_with_appearance(&inherited, palette);
+        assert_eq!(overridden.accent, Rgba(200, 1, 2, 255));
+        assert_eq!(overridden.warning, Rgba(21, 22, 23, 255));
+        assert_eq!(overridden.critical, palette.critical);
+        assert_eq!(overridden.opacity, 0.5);
+        assert_eq!(overridden.background_opacity, 0.25);
+        assert_eq!(overridden.corner_radius, 0.05);
+
+        let datasets: Vec<TelemetryDataset> = Vec::new();
+        let prepared = prepare_project_widgets_with_appearance(
+            &[inherited],
+            &datasets.as_slice(),
+            &palette_json,
+        );
+        assert_eq!(prepared.widgets[0].accent, Rgba(200, 1, 2, 255));
+        assert_eq!(prepared.widgets[0].positive, palette.positive);
     }
     #[test]
     fn scale_and_crop() {
@@ -3273,7 +3589,11 @@ mod tests {
             settings: serde_json::json!({}),
             unknown: Default::default(),
         };
-        assert!(!widget_from_core(&config).track_map.show_markers);
+        assert!(
+            !widget_from_core_with_appearance(&config, AppearancePalette::default())
+                .track_map
+                .show_markers
+        );
     }
 
     #[test]

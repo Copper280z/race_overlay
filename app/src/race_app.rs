@@ -13,8 +13,8 @@ use overlay_media::{
     WidgetGeometry, align_audio, discover, export_video, extract_mono_pcm, probe_video,
 };
 use overlay_render::{
-    AlignedDatasets, RenderOptions, RenderSize, prepare_project_widgets,
-    render_prepared_project_widgets, render_project_widgets,
+    AlignedDatasets, RenderOptions, RenderSize, prepare_project_widgets_with_appearance,
+    render_prepared_project_widgets, render_project_widgets_with_appearance, resolve_appearance,
 };
 use serde_json::{Value, json};
 use std::{
@@ -270,6 +270,7 @@ impl RaceOverlayApp {
         match self.initialize_video(path.clone()) {
             Ok(()) => {
                 let mut p = ProjectV1::new(path);
+                p.appearance = appearance_for_preset("race_dark");
                 p.widgets = default_widgets_for(self.unit_system);
                 self.project = Some(p.into());
                 self.project_path = None;
@@ -738,9 +739,11 @@ impl RaceOverlayApp {
             source_offsets: self.source_offsets(),
             ..Default::default()
         };
-        let result = render_project_widgets(
+        let appearance = project.appearance.clone();
+        let result = render_project_widgets_with_appearance(
             &project.widgets,
             &aligned,
+            &appearance,
             RenderSize::new(PREVIEW_W, PREVIEW_H),
             self.current_time,
             RenderOptions {
@@ -1329,7 +1332,11 @@ impl RaceOverlayApp {
             // Track geometry and any other static widget state are independent
             // of frame time. Preparing once avoids re-synchronizing and
             // selecting thousands of GPS points for every exported frame.
-            let prepared_widgets = prepare_project_widgets(&export_widgets, &aligned);
+            let prepared_widgets = prepare_project_widgets_with_appearance(
+                &export_widgets,
+                &aligned,
+                &project.appearance,
+            );
             let fps = metadata.fps().unwrap_or(30.0);
             let frame_count = (metadata.duration.unwrap_or(0.0) * fps).ceil() as u64;
             let mut frame = 0u64;
@@ -2517,7 +2524,112 @@ impl RaceOverlayApp {
         }
     }
 
+    fn appearance_panel(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let mut make_all_inherit = false;
+        {
+            let Some(project) = self.project_mut() else {
+                return;
+            };
+            let mut appearance = project.appearance.clone();
+            normalize_appearance(&mut appearance);
+            ui.collapsing("Appearance", |ui| {
+                let old_preset = appearance_preset(&appearance);
+                let mut preset = old_preset.to_owned();
+                egui::ComboBox::from_id_salt("appearance-preset")
+                    .selected_text(appearance_preset_label(&preset))
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("race_dark", "Race dark"),
+                            ("light", "Light"),
+                            ("transparent", "Transparent"),
+                            ("custom", "Custom"),
+                        ] {
+                            ui.selectable_value(&mut preset, value.to_owned(), label);
+                        }
+                    });
+                if preset != old_preset {
+                    if preset != "custom" {
+                        appearance = appearance_for_preset(&preset);
+                    } else {
+                        set_appearance_string(&mut appearance, "preset", "custom");
+                    }
+                    changed = true;
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Reset to preset").clicked() {
+                        let reset_preset = if preset == "custom" {
+                            "race_dark"
+                        } else {
+                            &preset
+                        };
+                        appearance = appearance_for_preset(reset_preset);
+                        changed = true;
+                    }
+                    if ui.button("Make all widgets use global").clicked() {
+                        make_all_inherit = true;
+                    }
+                });
+                ui.separator();
+                for (key, label) in [
+                    ("accent", "Accent"),
+                    ("text", "Text"),
+                    ("background", "Panel background"),
+                    ("muted", "Muted"),
+                    ("positive", "Positive"),
+                    ("warning", "Warning"),
+                    ("critical", "Critical"),
+                ] {
+                    if appearance_color_editor(ui, &mut appearance, key, label) {
+                        set_appearance_string(&mut appearance, "preset", "custom");
+                        changed = true;
+                    }
+                }
+                let mut foreground = appearance_number(&appearance, "foreground_opacity", 0.92);
+                if ui
+                    .add(egui::Slider::new(&mut foreground, 0.0..=1.0).text("Foreground opacity"))
+                    .changed()
+                {
+                    set_appearance_number(&mut appearance, "foreground_opacity", foreground);
+                    set_appearance_string(&mut appearance, "preset", "custom");
+                    changed = true;
+                }
+                let mut background = appearance_number(&appearance, "background_opacity", 0.92);
+                if ui
+                    .add(egui::Slider::new(&mut background, 0.0..=1.0).text("Background opacity"))
+                    .changed()
+                {
+                    set_appearance_number(&mut appearance, "background_opacity", background);
+                    set_appearance_string(&mut appearance, "preset", "custom");
+                    changed = true;
+                }
+                let mut radius = appearance_number(&appearance, "corner_radius", 0.12);
+                if ui
+                    .add(egui::Slider::new(&mut radius, 0.0..=0.30).text("Corner roundness"))
+                    .changed()
+                {
+                    set_appearance_number(&mut appearance, "corner_radius", radius);
+                    set_appearance_string(&mut appearance, "preset", "custom");
+                    changed = true;
+                }
+                ui.small("Widget-specific overrides are available in each widget's settings.");
+            });
+            if make_all_inherit {
+                for widget in &mut project.widgets {
+                    reset_widget_appearance(widget);
+                }
+                changed = true;
+            }
+            project.appearance = appearance;
+        }
+        if changed {
+            self.refresh_overlay();
+        }
+    }
+
     fn widgets_panel(&mut self, ui: &mut egui::Ui) {
+        self.appearance_panel(ui);
+        ui.separator();
         ui.heading("Widgets");
         ui.horizontal_wrapped(|ui| {
             for (label, kind) in [
@@ -2546,6 +2658,10 @@ impl RaceOverlayApp {
             .project()
             .map(|p| p.widgets.clone())
             .unwrap_or_default();
+        let global_appearance = self
+            .project()
+            .map(|p| p.appearance.clone())
+            .unwrap_or_else(|| appearance_for_preset("race_dark"));
         for (index, widget) in widgets.iter().enumerate() {
             let label = style_string(&widget.style, "label").unwrap_or_else(|| widget.kind.clone());
             if ui
@@ -2801,29 +2917,25 @@ impl RaceOverlayApp {
                 }
                 ui.small("Circuit mode keeps one representative lap; point-to-point uses the start and finish markers.");
             }
-            let mut opacity = style_number(&widget.style, "opacity").unwrap_or(1.0);
+            let mut inherit_appearance =
+                style_bool(&widget.style, "inherit_appearance").unwrap_or(true);
             if ui
-                .add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("Foreground opacity"))
-                .changed()
-            {
-                set_style(&mut widget.style, "opacity", json!(opacity));
-                refresh = true;
-            }
-            let mut background_opacity =
-                style_number(&widget.style, "background_opacity").unwrap_or(opacity);
-            if ui
-                .add(
-                    egui::Slider::new(&mut background_opacity, 0.0..=1.0)
-                        .text("Background opacity"),
-                )
+                .checkbox(&mut inherit_appearance, "Use global appearance")
                 .changed()
             {
                 set_style(
                     &mut widget.style,
-                    "background_opacity",
-                    json!(background_opacity),
+                    "inherit_appearance",
+                    json!(inherit_appearance),
                 );
                 refresh = true;
+            }
+            if !inherit_appearance {
+                ui.collapsing("Appearance overrides", |ui| {
+                    if widget_appearance_ui(ui, widget, &global_appearance) {
+                        refresh = true;
+                    }
+                });
             }
             let mut label = style_string(&widget.style, "label").unwrap_or_default();
             if ui.text_edit_singleline(&mut label).changed() {
@@ -3666,11 +3778,7 @@ fn make_widget(kind: &str, index: usize) -> WidgetConfig {
         rect,
         bindings: vec![],
         style: json!({
-            "opacity": 0.92,
-            "background_opacity": 0.92,
-            "background": [10, 15, 22, 210],
-            "accent": [0, 218, 255, 255],
-            "text": [255, 255, 255, 255],
+            "inherit_appearance": true,
             "label": label,
             "unit": unit,
             "min": min,
@@ -4024,6 +4132,218 @@ fn remove_style(style: &mut Value, name: &str) {
     }
 }
 
+const APPEARANCE_COLOR_KEYS: &[&str] = &[
+    "accent",
+    "text",
+    "background",
+    "muted",
+    "positive",
+    "warning",
+    "critical",
+];
+
+fn appearance_for_preset(name: &str) -> Value {
+    let preset = match name {
+        "light" | "transparent" | "race_dark" => name,
+        _ => "race_dark",
+    };
+    let palette = resolve_appearance(&json!({"preset": preset}));
+    json!({
+        "preset": preset,
+        "accent": [palette.accent.0, palette.accent.1, palette.accent.2],
+        "text": [palette.text.0, palette.text.1, palette.text.2],
+        "background": [palette.background.0, palette.background.1, palette.background.2],
+        "muted": [palette.muted.0, palette.muted.1, palette.muted.2],
+        "positive": [palette.positive.0, palette.positive.1, palette.positive.2],
+        "warning": [palette.warning.0, palette.warning.1, palette.warning.2],
+        "critical": [palette.critical.0, palette.critical.1, palette.critical.2],
+        "foreground_opacity": palette.foreground_opacity,
+        "background_opacity": palette.background_opacity,
+        "corner_radius": palette.corner_radius,
+    })
+}
+
+fn normalize_appearance(appearance: &mut Value) {
+    let preset = appearance_preset(appearance).to_owned();
+    let defaults = appearance_for_preset(&preset);
+    if !appearance.is_object() {
+        *appearance = defaults;
+        return;
+    }
+    for key in APPEARANCE_COLOR_KEYS {
+        if appearance.get(*key).and_then(parse_rgb).is_none() {
+            set_appearance_value(appearance, key, defaults.get(*key).cloned().unwrap());
+        }
+    }
+    for (key, fallback) in [
+        ("foreground_opacity", 0.92),
+        ("background_opacity", 0.92),
+        ("corner_radius", 0.12),
+    ] {
+        if appearance_number(appearance, key, f64::NAN).is_nan() {
+            set_appearance_number(appearance, key, fallback);
+        }
+    }
+}
+
+fn appearance_preset(appearance: &Value) -> &str {
+    appearance
+        .get("preset")
+        .and_then(Value::as_str)
+        .filter(|name| matches!(*name, "race_dark" | "light" | "transparent" | "custom"))
+        .unwrap_or("race_dark")
+}
+
+fn appearance_preset_label(name: &str) -> &'static str {
+    match name {
+        "light" => "Light",
+        "transparent" => "Transparent",
+        "custom" => "Custom",
+        _ => "Race dark",
+    }
+}
+
+fn parse_rgb(value: &Value) -> Option<[u8; 3]> {
+    let values = value.as_array()?;
+    Some([
+        u8::try_from(values.first()?.as_u64()?).ok()?,
+        u8::try_from(values.get(1)?.as_u64()?).ok()?,
+        u8::try_from(values.get(2)?.as_u64()?).ok()?,
+    ])
+}
+
+fn appearance_number(appearance: &Value, key: &str, fallback: f64) -> f64 {
+    appearance
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback)
+}
+
+fn set_appearance_value(appearance: &mut Value, key: &str, value: Value) {
+    if !appearance.is_object() {
+        *appearance = json!({});
+    }
+    appearance
+        .as_object_mut()
+        .unwrap()
+        .insert(key.into(), value);
+}
+
+fn set_appearance_string(appearance: &mut Value, key: &str, value: &str) {
+    set_appearance_value(appearance, key, json!(value));
+}
+
+fn set_appearance_number(appearance: &mut Value, key: &str, value: f64) {
+    set_appearance_value(appearance, key, json!(value));
+}
+
+fn appearance_color_editor(
+    ui: &mut egui::Ui,
+    appearance: &mut Value,
+    key: &str,
+    label: &str,
+) -> bool {
+    let mut color =
+        parse_rgb(appearance.get(key).unwrap_or(&Value::Null)).unwrap_or([255, 255, 255]);
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.color_edit_button_srgb(&mut color).changed() {
+            set_appearance_value(appearance, key, json!(color));
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn widget_appearance_ui(
+    ui: &mut egui::Ui,
+    widget: &mut WidgetConfig,
+    global_appearance: &Value,
+) -> bool {
+    let mut changed = false;
+    for (key, label) in [
+        ("accent", "Accent"),
+        ("text", "Text"),
+        ("background", "Panel background"),
+        ("muted", "Muted"),
+        ("positive", "Positive"),
+        ("warning", "Warning"),
+        ("critical", "Critical"),
+    ] {
+        let rgb = style_rgb(&widget.style, key).unwrap_or_else(|| {
+            parse_rgb(global_appearance.get(key).unwrap_or(&Value::Null)).unwrap_or([255, 255, 255])
+        });
+        let mut color = rgb;
+        let mut color_changed = false;
+        let mut reset = false;
+        ui.horizontal(|ui| {
+            ui.label(label);
+            color_changed = ui.color_edit_button_srgb(&mut color).changed();
+            reset = ui.small_button("Reset").clicked();
+        });
+        if color_changed {
+            set_style(&mut widget.style, key, json!(color));
+            changed = true;
+        }
+        if reset {
+            remove_style(&mut widget.style, key);
+            changed = true;
+        }
+    }
+    for (key, label, range, fallback) in [
+        (
+            "opacity",
+            "Foreground opacity",
+            (0.0, 1.0),
+            appearance_number(global_appearance, "foreground_opacity", 0.92),
+        ),
+        (
+            "background_opacity",
+            "Background opacity",
+            (0.0, 1.0),
+            appearance_number(global_appearance, "background_opacity", 0.92),
+        ),
+        (
+            "corner_radius",
+            "Corner roundness",
+            (0.0, 0.30),
+            appearance_number(global_appearance, "corner_radius", 0.12),
+        ),
+    ] {
+        let mut value = style_number(&widget.style, key).unwrap_or(fallback);
+        if ui
+            .add(egui::Slider::new(&mut value, range.0..=range.1).text(label))
+            .changed()
+        {
+            set_style(&mut widget.style, key, json!(value));
+            changed = true;
+        }
+    }
+    if ui.button("Reset all widget overrides").clicked() {
+        reset_widget_appearance(widget);
+        changed = true;
+    }
+    changed
+}
+
+fn style_rgb(style: &Value, key: &str) -> Option<[u8; 3]> {
+    parse_rgb(style.get(key).unwrap_or(&Value::Null))
+}
+
+fn reset_widget_appearance(widget: &mut WidgetConfig) {
+    for key in APPEARANCE_COLOR_KEYS.iter().copied().chain([
+        "opacity",
+        "foreground_opacity",
+        "background_opacity",
+        "corner_radius",
+    ]) {
+        remove_style(&mut widget.style, key);
+    }
+    set_style(&mut widget.style, "inherit_appearance", json!(true));
+}
+
 fn format_time(seconds: f64) -> String {
     let seconds = seconds.max(0.0);
     format!("{:02}:{:05.2}", (seconds / 60.0) as u64, seconds % 60.0)
@@ -4124,6 +4444,48 @@ mod tests {
             .unwrap();
         assert_eq!(style_string(&speed.style, "unit").as_deref(), Some("mph"));
         assert!((style_number(&speed.style, "max").unwrap() - 136.701_7).abs() < 0.001);
+    }
+
+    #[test]
+    fn appearance_presets_keep_rgb_and_opacity_separate() {
+        let dark = appearance_for_preset("race_dark");
+        assert_eq!(appearance_preset(&dark), "race_dark");
+        assert_eq!(parse_rgb(&dark["accent"]), Some([0, 218, 255]));
+        assert_eq!(dark["accent"].as_array().unwrap().len(), 3);
+        let transparent = appearance_for_preset("transparent");
+        assert_eq!(transparent["background_opacity"], json!(0.0));
+        assert_eq!(parse_rgb(&transparent["background"]), Some([10, 15, 22]));
+        assert_eq!(transparent["background"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn appearance_json_normalization_fills_missing_fields_without_replacing_custom_values() {
+        let mut appearance = json!({
+            "preset": "custom",
+            "accent": [1, 2, 3],
+            "background_opacity": 0.4
+        });
+        normalize_appearance(&mut appearance);
+        assert_eq!(parse_rgb(&appearance["accent"]), Some([1, 2, 3]));
+        assert_eq!(appearance["background_opacity"], json!(0.4));
+        assert!(parse_rgb(&appearance["critical"]).is_some());
+        assert_eq!(appearance_number(&appearance, "corner_radius", 0.0), 0.12);
+    }
+
+    #[test]
+    fn widget_appearance_reset_restores_global_inheritance() {
+        let mut widget = make_widget("numeric", 0);
+        set_style(&mut widget.style, "inherit_appearance", json!(false));
+        set_style(&mut widget.style, "accent", json!([1, 2, 3, 4]));
+        set_style(&mut widget.style, "opacity", json!(0.2));
+        set_style(&mut widget.style, "foreground_opacity", json!(0.3));
+        set_style(&mut widget.style, "corner_radius", json!(0.25));
+        reset_widget_appearance(&mut widget);
+        assert_eq!(style_bool(&widget.style, "inherit_appearance"), Some(true));
+        assert!(widget.style.get("accent").is_none());
+        assert!(widget.style.get("opacity").is_none());
+        assert!(widget.style.get("foreground_opacity").is_none());
+        assert!(widget.style.get("corner_radius").is_none());
     }
 
     #[test]
@@ -4350,10 +4712,9 @@ mod tests {
             assert!(widget.style.get("label").and_then(Value::as_str).is_some());
             assert!(widget.style.get("format").and_then(Value::as_str).is_some());
         }
-        assert_eq!(
-            style_number(&make_widget("gear", 0).style, "background_opacity"),
-            Some(0.92)
-        );
+        let gear = make_widget("gear", 0);
+        assert_eq!(style_bool(&gear.style, "inherit_appearance"), Some(true));
+        assert!(gear.style.get("background_opacity").is_none());
         assert_eq!(
             preferred_channels("temperature"),
             &["water_temperature", "exhaust_temperature"]

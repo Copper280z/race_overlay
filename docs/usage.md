@@ -66,6 +66,16 @@ cargo run --release -p race-overlay
    Bound widgets also have a compatible display-unit selector, so an individual
    speed, temperature, pressure, distance, angle, time, or acceleration widget
    can override the default without relabeling unconverted data.
+   Use **Appearance** to choose a project-wide style preset: **Race Dark**,
+   **Light**, **Transparent**, or **Custom**. The project palette has semantic
+   colors for accent, text, panel, muted, positive, warning, and critical
+   elements. A widget inherits that palette by default; turn off **Use global
+   appearance** on an individual widget to expose its color overrides. This
+   lets, for example, one widget use a different accent or warning color while
+   the rest of the dashboard remains consistent. Color controls edit RGB only.
+   Foreground opacity (data, labels, ticks, and lamps) and background opacity
+   (the rounded panel) remain separate controls, both globally and per widget.
+   Corner roundness is also available globally and as a per-widget override.
    Add **Track map** for GPS-equipped recordings. It automatically binds
    latitude and longitude from the same source when available and draws one
    representative path for multi-lap circuit logs. Choose **Auto**, **Circuit**,

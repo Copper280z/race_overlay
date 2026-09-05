@@ -9,7 +9,8 @@ The editor provides numeric, bar, speed gauge, GPS track map, G-meter, tachomete
 lap timer, delta, shift-light, steering/input, and gear widgets. An additive
 MyChron dashboard preset lays out and binds a complete race display in one
 click. Widgets can be bound to channels from any loaded source, dragged and
-resized over a muted video preview, styled with independent foreground and
+resized over a muted video preview, styled with a project-wide appearance
+palette plus per-widget color overrides and independent foreground and
 background opacity, converted between metric and imperial display units, and
 exported to MP4 through FFmpeg while retaining the source audio stream. Optional
 zero-phase, non-causal source, derived-G, graph-preview, and widget low-pass
