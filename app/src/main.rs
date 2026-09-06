@@ -1,3 +1,6 @@
+mod analysis_app;
+mod analysis_imagery;
+mod analysis_maps;
 mod race_app;
 
 fn main() -> eframe::Result {

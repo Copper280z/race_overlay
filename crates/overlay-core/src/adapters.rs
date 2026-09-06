@@ -385,11 +385,10 @@ pub struct CsvColumnConfig {
     pub gap_seconds: Option<f64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CsvConfig {
     /// Zero-based record row containing headers. `None` means generated column names.
-    #[serde(default)]
     pub header_row: Option<usize>,
-    #[serde(default)]
     pub time_column: Option<ColumnSelector>,
     #[serde(default)]
     pub time_unit: TimeUnit,
@@ -856,6 +855,19 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    #[test]
+    fn csv_source_filter_settings_do_not_disable_default_time_and_headers() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "t,speed\n0,10\n1,20\n").unwrap();
+        let data = GenericCsvAdapter
+            .load(
+                SourceId::new(),
+                f.path(),
+                &serde_json::json!({"low_pass_enabled":true,"low_pass_hz":2.0}),
+            )
+            .unwrap();
+        assert_eq!(data.named("speed").unwrap().series.samples.len(), 2);
+    }
     #[test]
     fn csv_detects_semicolon_and_interpolates() {
         let mut f = NamedTempFile::new().unwrap();

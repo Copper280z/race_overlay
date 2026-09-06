@@ -5,6 +5,7 @@
 //! portable and also makes a missing installation an ordinary, reportable
 //! error.
 
+mod analysis_preview;
 mod audio;
 mod export;
 mod ffmpeg;
@@ -12,6 +13,7 @@ mod preview;
 mod probe;
 mod sync;
 
+pub use analysis_preview::{AbsolutePreview, AnalysisPreview, AnalysisPreviewConfig};
 pub use audio::{extract_mono_pcm, extract_mono_pcm_with_tools};
 pub use export::{
     CancelToken, ExportCommand, ExportError, ExportProgress, ExportSettings, FrameProvider,

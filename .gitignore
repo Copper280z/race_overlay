@@ -25,6 +25,11 @@ __pycache__/
 
 # Local editor projects contain machine-specific media paths.
 *.race-overlay.json
+*.race-analysis.json
+*.race-analysis.assets/
+*.race-analysis.json.assets/
+*.race-analysis.assets.json
+/analysis.assets/
 
 # Proprietary logger captures remain local unless deliberately promoted to a
 # small, redistributable test fixture later.

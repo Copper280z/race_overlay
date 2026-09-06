@@ -82,6 +82,9 @@ struct CorrelationEstimate {
 }
 
 pub struct RaceOverlayApp {
+    analysis: crate::analysis_app::AnalysisApp,
+    analysis_mode: bool,
+    overlay_from_analysis: bool,
     tools: Option<FfmpegTools>,
     tools_error: Option<String>,
     project: Option<ProjectDocument>,
@@ -147,6 +150,9 @@ impl RaceOverlayApp {
             Err(e) => (None, Some(e.to_string())),
         };
         Self {
+            analysis: crate::analysis_app::AnalysisApp::new(),
+            analysis_mode: true,
+            overlay_from_analysis: false,
             tools,
             tools_error,
             project: None,
@@ -163,7 +169,7 @@ impl RaceOverlayApp {
             selected_source: None,
             selected_widget: None,
             resizing_widget: false,
-            status: "Open the Insta360 Studio MP4 to begin".into(),
+            status: "Add telemetry in Analysis, or switch to Overlay to open a video.".into(),
             tx,
             rx,
             export_cancel: None,
@@ -212,6 +218,76 @@ impl RaceOverlayApp {
 
     fn project(&self) -> Option<&ProjectV1> {
         self.project.as_ref().map(ProjectDocument::v1)
+    }
+
+    fn open_analysis_overlay(&mut self, project: ProjectV1) {
+        if project.video_path.as_os_str().is_empty() {
+            self.status =
+                "Attach an exported video to this recording before opening its overlay.".into();
+            return;
+        }
+        if let Err(error) = self.initialize_video(project.video_path.clone()) {
+            self.status = error;
+            return;
+        }
+        self.datasets.clear();
+        self.invalidate_correlation();
+        self.project_path = None;
+        let sources = project.sources.clone();
+        self.project = Some(project.into());
+        self.selected_source = None;
+        self.selected_widget = None;
+        self.analysis_mode = false;
+        self.overlay_from_analysis = true;
+        for source in sources {
+            self.load_source_async(source);
+        }
+        self.status =
+            "Overlay editor: changes return to this recording when you switch to Analysis.".into();
+    }
+
+    fn workspace_mode_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(self.analysis_mode, "Analysis")
+                .clicked()
+                && !self.analysis_mode
+            {
+                self.stop_playback();
+                if !self.overlay_from_analysis {
+                    self.analysis.clear_overlay_link();
+                }
+                if let Some(project) = self.project().cloned() {
+                    self.analysis.import_project(project);
+                }
+                self.analysis_mode = true;
+            }
+            if ui
+                .selectable_label(!self.analysis_mode, "Overlay")
+                .clicked()
+            {
+                self.analysis.pause();
+                self.analysis_mode = false;
+            }
+            ui.separator();
+            ui.weak(if self.analysis_mode {
+                "Compare laps and runs · video and imagery optional"
+            } else {
+                "Edit widgets and export video"
+            });
+            if self.analysis_mode {
+                egui::ComboBox::from_id_salt("analysis-unit-system")
+                    .selected_text(unit_system_label(self.unit_system))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.unit_system, UnitSystem::Metric, "Metric");
+                        ui.selectable_value(
+                            &mut self.unit_system,
+                            UnitSystem::Imperial,
+                            "Imperial",
+                        );
+                    });
+            }
+        });
     }
 
     fn project_mut(&mut self) -> Option<&mut ProjectV1> {
@@ -269,6 +345,7 @@ impl RaceOverlayApp {
         };
         match self.initialize_video(path.clone()) {
             Ok(()) => {
+                self.overlay_from_analysis = false;
                 let mut p = ProjectV1::new(path);
                 p.appearance = appearance_for_preset("race_dark");
                 p.widgets = default_widgets_for(self.unit_system);
@@ -302,6 +379,7 @@ impl RaceOverlayApp {
                 self.datasets.clear();
                 self.invalidate_correlation();
                 self.project_path = Some(path);
+                self.overlay_from_analysis = false;
                 self.project = Some(doc);
                 self.calibration_low_pass_hz = self
                     .project()
@@ -3369,6 +3447,34 @@ impl eframe::App for RaceOverlayApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_workers(&ctx);
+        egui::Panel::top("workspace-mode").show(ui, |ui| self.workspace_mode_bar(ui));
+        if self.analysis_mode {
+            egui::Panel::bottom("analysis-host-status").show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.small(&self.status);
+                    if let Some(cancel) = &self.export_cancel {
+                        ui.add(egui::ProgressBar::new(self.export_fraction).desired_width(140.0));
+                        if ui.button("Cancel export").clicked() {
+                            cancel.cancel();
+                        }
+                    }
+                });
+            });
+            self.analysis.ui(ui, self.tools.as_ref(), self.unit_system);
+            for action in self.analysis.take_actions() {
+                match action {
+                    crate::analysis_app::AnalysisAction::OpenOverlay(project) => {
+                        self.open_analysis_overlay(project)
+                    }
+                }
+            }
+            // An export already in progress continues while data is inspected.
+            if self.export_cancel.is_some() {
+                self.export_dialog(&ctx);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            return;
+        }
         if let Some(image) = self.pending_overlay_image.take() {
             self.overlay_texture =
                 Some(ctx.load_texture("telemetry-overlay", image, egui::TextureOptions::LINEAR));
@@ -3942,24 +4048,12 @@ fn set_source_low_pass_settings(settings: &mut Value, enabled: bool, cutoff_hz: 
     object.insert(SOURCE_LOW_PASS_HZ.into(), json!(cutoff_hz.clamp(0.5, 50.0)));
 }
 
+#[cfg(test)]
 fn apply_low_pass_to_dataset(
     dataset: &mut TelemetryDataset,
     cutoff_hz: f64,
 ) -> Result<usize, String> {
-    let mut filtered = 0;
-    for channel in dataset.channels.values_mut() {
-        if channel.descriptor.interpolation != overlay_core::Interpolation::Linear
-            || channel.series.samples.len() < 2
-        {
-            continue;
-        }
-        channel.series = channel
-            .series
-            .low_pass_hz(cutoff_hz)
-            .map_err(|error| error.to_string())?;
-        filtered += 1;
-    }
-    Ok(filtered)
+    overlay_core::apply_low_pass_to_dataset(dataset, cutoff_hz)
 }
 
 /// Apply source conditioning before deriving camera-frame channels. Keeping
@@ -3970,14 +4064,7 @@ fn prepare_loaded_dataset(
     source_cutoff_hz: Option<f64>,
     camera_calibration: Option<&CameraCalibration>,
 ) -> Result<usize, String> {
-    let filtered_channels = match source_cutoff_hz {
-        Some(cutoff_hz) => apply_low_pass_to_dataset(dataset, cutoff_hz)?,
-        None => 0,
-    };
-    if let Some(calibration) = camera_calibration {
-        add_derived_inertial_channels(dataset, calibration, INSTA360_IMU_SAMPLE_RATE_HZ);
-    }
-    Ok(filtered_channels)
+    overlay_core::prepare_loaded_dataset(dataset, source_cutoff_hz, camera_calibration)
 }
 
 fn remove_source_bindings(project: &mut ProjectV1, source_id: SourceId) -> usize {

@@ -3,8 +3,9 @@
 ## Project overview
 
 Race Overlay is a cross-platform Rust desktop editor that synchronizes racing
-telemetry with onboard video and burns configurable data widgets into an
-exported video. The source video is expected to have already been stitched or
+telemetry with onboard video, compares laps/runs in a dockable Analysis workspace,
+and burns configurable data widgets into an exported video in Overlay mode.
+The source video is expected to have already been stitched or
 reframed by Insta360 Studio; this project does not implement raw dual-lens
 stitching.
 
@@ -22,6 +23,17 @@ The workspace is divided into:
 
 ## Product goals and required behavior
 
+- Analysis extends rather than replaces Overlay. Importing or editing one
+  recording must not discard other recordings, source identities, or dashboards.
+  Fast telemetry-only autocross comparison requires neither video nor a saved
+  track. Circuit laps and multiple single-run recordings are both first-class.
+- Analysis comparison clocks are segment-relative; linked videos remain on each
+  recording's own exported-video clock. Course-position matching and traveled
+  distance are distinct modes. Keep the reference pinned, expose matching gaps,
+  and do not extrapolate video or telemetry beyond available coverage.
+- Analysis panels can dock, tab, and float. Workspaces save layouts, selections,
+  gates, anchors, and imagery registration. Actual GPS maps retain geographic
+  coordinates separately from simplified reference-course geometry.
 - Normal UI time is exported-video time: `0.0 s` means the first frame of the
   Insta360 Studio export. Raw-source timing is an explicit advanced override,
   and time/range controls may accept negative values where relevant.

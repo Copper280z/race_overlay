@@ -9,6 +9,8 @@ anyhow.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 egui.workspace = true
+egui_dock.workspace = true
+egui_plot.workspace = true
 log.workspace = true
 overlay-core = { path = "../crates/overlay-core" }
 overlay-media = { path = "../crates/overlay-media" }
@@ -17,3 +19,8 @@ rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+image = { workspace = true, features = ["jpeg"] }
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -18,6 +18,8 @@ crossbeam-channel = "0.5"
 csv = "1.4"
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu", "wayland", "x11"] }
 egui = "0.36"
+egui_dock = { version = "0.21", features = ["serde"] }
+egui_plot = "0.37"
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
@@ -31,3 +33,4 @@ tempfile = "3.23"
 thiserror = "2.0"
 tiny-skia = "0.12"
 uuid = { version = "1.18", features = ["v4", "serde"] }
+ureq = "3"
