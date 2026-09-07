@@ -1,9 +1,9 @@
 //! Telemetry-first analysis workspace. The existing overlay editor is a separate mode.
-use crate::analysis_maps::{MapPanel, MapSettings, MapTrace};
+use crate::analysis_maps::{MapColorMode, MapPanel, MapSettings, MapTrace};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use overlay_core::*;
-use overlay_media::{AnalysisPreview, FfmpegTools, VideoMetadata};
+use overlay_media::{AlignmentResult, AnalysisPreview, FfmpegTools, VideoMetadata};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -15,6 +15,8 @@ use std::{
 #[cfg(test)]
 #[path = "analysis_tests.rs"]
 mod tests;
+#[path = "analysis_video_alignment.rs"]
+mod video_alignment;
 #[path = "analysis_views.rs"]
 mod views;
 #[path = "analysis_workflow.rs"]
@@ -29,6 +31,12 @@ const COLORS: [egui::Color32; 8] = [
     egui::Color32::from_rgb(250, 105, 140),
     egui::Color32::from_rgb(180, 190, 255),
 ];
+const DELTA_CHANNEL: &str = "delta_time";
+const DELTA_LABEL: &str = "Time delta — positive is slower";
+const VIDEO_AUDIO_OFFSET_KEY: &str = "analysis_video_audio_offset_seconds";
+const VIDEO_AUDIO_PEAK_KEY: &str = "analysis_video_audio_peak";
+const VIDEO_AUDIO_CONFIDENCE_KEY: &str = "analysis_video_audio_confidence";
+const VIDEO_ALIGNMENT_APPLIED_KEY: &str = "analysis_video_alignment_applied";
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize, Debug)]
 enum XMode {
     Time,
@@ -53,6 +61,8 @@ struct PlotOptions {
     units: BTreeMap<String, Unit>,
     bindings: BTreeMap<String, ChannelRef>,
     delta: bool,
+    show_legend: bool,
+    legend_labels: BTreeMap<String, String>,
     #[serde(flatten)]
     unknown: BTreeMap<String, Value>,
 }
@@ -64,6 +74,37 @@ impl Default for PlotOptions {
             units: BTreeMap::new(),
             bindings: BTreeMap::new(),
             delta: false,
+            show_legend: true,
+            legend_labels: Default::default(),
+            unknown: Default::default(),
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct ScatterOptions {
+    x_channel: String,
+    y_channel: String,
+    z_channel: Option<String>,
+    filter: Option<f64>,
+    units: BTreeMap<String, Unit>,
+    bindings: BTreeMap<String, ChannelRef>,
+    show_legend: bool,
+    legend_labels: BTreeMap<String, String>,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, Value>,
+}
+impl Default for ScatterOptions {
+    fn default() -> Self {
+        Self {
+            x_channel: "gps_lateral_acceleration".into(),
+            y_channel: "gps_inline_acceleration".into(),
+            z_channel: None,
+            filter: None,
+            units: Default::default(),
+            bindings: Default::default(),
+            show_legend: true,
+            legend_labels: Default::default(),
             unknown: Default::default(),
         }
     }
@@ -81,6 +122,7 @@ struct VideoOptions {
 enum TabKind {
     Browser,
     Plot(PlotOptions),
+    Scatter(ScatterOptions),
     Video(VideoOptions),
     Map {
         channel: String,
@@ -107,6 +149,7 @@ impl Tab {
                     "Channel plot".into()
                 }
             }
+            TabKind::Scatter(_) => "X/Y scatter plot".into(),
             TabKind::Video(v) => format!("Video {}", v.slot + 1),
             TabKind::Map { settings, .. } => {
                 if settings.actual_gps {
@@ -174,6 +217,52 @@ struct Prepared {
     course: Option<ReferenceCourse>,
     automatic_time_alignment: bool,
 }
+#[derive(Clone, Debug)]
+struct VideoAlignmentCandidate {
+    recording_id: RecordingId,
+    target_source: SourceId,
+    camera_source: SourceId,
+    target_channel: ChannelRef,
+    camera_channel: ChannelRef,
+    camera_video_offset_seconds: f64,
+    result: CorrelationResult,
+}
+#[derive(Clone)]
+struct VehicleCalibrationDraft {
+    start: f64,
+    end: f64,
+    source_time: bool,
+    auto_stationary: bool,
+    forward_axis: usize,
+    roll_degrees: f64,
+    pitch_degrees: f64,
+    yaw_degrees: f64,
+    low_pass_hz: f64,
+}
+impl Default for VehicleCalibrationDraft {
+    fn default() -> Self {
+        Self {
+            start: 0.0,
+            end: 2.0,
+            source_time: false,
+            auto_stationary: true,
+            forward_axis: 0,
+            roll_degrees: 0.0,
+            pitch_degrees: 0.0,
+            yaw_degrees: 0.0,
+            low_pass_hz: 8.0,
+        }
+    }
+}
+fn resolved_video_alignment_offsets(
+    target_recording_offset: f64,
+    target_minus_camera_seconds: f64,
+    camera_minus_video_seconds: f64,
+) -> (f64, f64) {
+    let camera_recording_offset = target_recording_offset - target_minus_camera_seconds;
+    let video_recording_offset = camera_recording_offset - camera_minus_video_seconds;
+    (camera_recording_offset, video_recording_offset)
+}
 fn automatic_alignment_complete(prepared: &Prepared, reference: Option<&SegmentRef>) -> bool {
     let candidates = prepared
         .runs
@@ -196,6 +285,8 @@ enum Event {
     Loaded(u64, SourceId, Result<SourceData, String>),
     Prepared(u64, Prepared),
     Probed(PathBuf, Result<VideoMetadata, String>),
+    VideoAudioAligned(u64, RecordingId, SourceId, Result<AlignmentResult, String>),
+    VideoAlignmentEstimated(u64, RecordingId, Result<VideoAlignmentCandidate, String>),
 }
 struct VideoRuntime {
     path: PathBuf,
@@ -205,10 +296,17 @@ struct VideoRuntime {
     error: Option<String>,
 }
 struct PlotTrace {
+    segment: SegmentRef,
     name: String,
     color: egui::Color32,
     points: Vec<Vec<[f64; 2]>>,
     unit: Unit,
+}
+struct ScatterTrace {
+    segment: SegmentRef,
+    name: String,
+    color: egui::Color32,
+    points: Vec<[f64; 3]>,
 }
 pub struct AnalysisApp {
     pub workspace: AnalysisWorkspace,
@@ -230,17 +328,25 @@ pub struct AnalysisApp {
     preparing: bool,
     prepared: Prepared,
     plot_cache: HashMap<String, Arc<Vec<PlotTrace>>>,
+    scatter_cache: HashMap<String, Arc<Vec<ScatterTrace>>>,
     map_cache: HashMap<String, Vec<MapTrace>>,
     maps: HashMap<u64, MapPanel>,
     videos: HashMap<u64, VideoRuntime>,
     visible_videos: HashSet<u64>,
     metadata: HashMap<PathBuf, Result<VideoMetadata, String>>,
     probing: HashSet<PathBuf>,
+    video_audio_jobs: HashMap<SourceId, u64>,
+    video_audio_results: HashMap<SourceId, Result<AlignmentResult, String>>,
+    video_alignment_jobs: HashMap<RecordingId, u64>,
+    video_alignment_results: HashMap<RecordingId, Result<VideoAlignmentCandidate, String>>,
+    video_alignment_channels: HashMap<RecordingId, (ChannelRef, ChannelRef)>,
+    vehicle_calibration_drafts: HashMap<SourceId, VehicleCalibrationDraft>,
     playing: bool,
     last_frame: Instant,
     active_overlay: Option<RecordingId>,
     remove_recording: Option<RecordingId>,
     auto_select_pending: bool,
+    select_imports_pending: HashSet<RecordingId>,
     auto_mode_pending: bool,
     automatic_mode: bool,
 }
@@ -271,17 +377,25 @@ impl AnalysisApp {
                 automatic_time_alignment: false,
             },
             plot_cache: HashMap::new(),
+            scatter_cache: HashMap::new(),
             map_cache: HashMap::new(),
             maps: HashMap::new(),
             videos: HashMap::new(),
             visible_videos: HashSet::new(),
             metadata: HashMap::new(),
             probing: HashSet::new(),
+            video_audio_jobs: HashMap::new(),
+            video_audio_results: HashMap::new(),
+            video_alignment_jobs: HashMap::new(),
+            video_alignment_results: HashMap::new(),
+            video_alignment_channels: HashMap::new(),
+            vehicle_calibration_drafts: HashMap::new(),
             playing: false,
             last_frame: Instant::now(),
             active_overlay: None,
             remove_recording: None,
             auto_select_pending: false,
+            select_imports_pending: HashSet::new(),
             auto_mode_pending: false,
             automatic_mode: true,
         };
@@ -354,14 +468,73 @@ impl AnalysisApp {
         self.dirty = true;
         self.revision = self.revision.wrapping_add(1);
         self.plot_cache.clear();
+        self.scatter_cache.clear();
         self.map_cache.clear();
     }
     pub fn pause(&mut self) {
         self.playing = false;
         self.videos.clear();
     }
+    pub fn step_reference(&mut self, direction: i32) {
+        let Some(run) = self.reference_run() else {
+            return;
+        };
+        let Some(recording) = self
+            .workspace
+            .recordings
+            .iter()
+            .find(|recording| recording.id == run.key.recording_id)
+        else {
+            return;
+        };
+        let duration = (run.end - run.start).max(0.0);
+        let current_recording_time = run.start + self.state.cursor;
+        let video_step = recording
+            .video_path
+            .as_ref()
+            .and_then(|path| self.metadata.get(path))
+            .and_then(|metadata| metadata.as_ref().ok())
+            .and_then(VideoMetadata::fps)
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+            .map(|fps| 1.0 / fps);
+        let next_elapsed = video_step
+            .map(|step| self.state.cursor + f64::from(direction) * step)
+            .or_else(|| {
+                let source = recording
+                    .sources
+                    .iter()
+                    .find(|source| source.id == recording.primary_source)?;
+                let dataset = self.data.get(&source.id)?;
+                let source_time = current_recording_time + source.alignment.offset_seconds;
+                let adjacent = dataset.processed.channels.values().filter_map(|channel| {
+                    let samples = &channel.series.samples;
+                    if direction < 0 {
+                        let index =
+                            samples.partition_point(|sample| sample.time < source_time - 1e-9);
+                        index.checked_sub(1).and_then(|index| samples.get(index))
+                    } else {
+                        let index =
+                            samples.partition_point(|sample| sample.time <= source_time + 1e-9);
+                        samples.get(index)
+                    }
+                });
+                let sample = if direction < 0 {
+                    adjacent.max_by(|left, right| left.time.total_cmp(&right.time))
+                } else {
+                    adjacent.min_by(|left, right| left.time.total_cmp(&right.time))
+                }?;
+                Some(sample.time - source.alignment.offset_seconds - run.start)
+            });
+        if let Some(elapsed) = next_elapsed {
+            self.playing = false;
+            self.state.cursor = elapsed.clamp(0.0, duration);
+        }
+    }
     pub fn take_actions(&mut self) -> Vec<AnalysisAction> {
         std::mem::take(&mut self.actions)
+    }
+    pub fn report_overlay_open_error(&mut self, error: impl Into<String>) {
+        self.message = format!("Could not open Overlay: {}", error.into());
     }
     pub fn clear_overlay_link(&mut self) {
         self.active_overlay = None;
@@ -380,7 +553,24 @@ impl AnalysisApp {
                     .position(|r| r.sources.iter().any(|s| ids.contains(&s.id)))
             });
         let video_offset = existing
-            .map(|i| self.workspace.recordings[i].video_offset_seconds)
+            .map(|index| {
+                let old = &self.workspace.recordings[index];
+                let old_primary_offset = old
+                    .sources
+                    .iter()
+                    .find(|source| source.id == old.primary_source)
+                    .map(|source| source.alignment.offset_seconds);
+                let incoming_primary_offset = project
+                    .sources
+                    .iter()
+                    .find(|source| source.id == old.primary_source)
+                    .map(|source| source.alignment.offset_seconds);
+                old_primary_offset
+                    .zip(incoming_primary_offset)
+                    .map_or(old.video_offset_seconds, |(recording, video)| {
+                        recording - video
+                    })
+            })
             .unwrap_or(0.0);
         let mut recording = recording_from_project(project, "Overlay recording", video_offset);
         if let Some(i) = existing {
@@ -411,11 +601,22 @@ impl AnalysisApp {
         self.changed();
     }
     fn enqueue(&mut self, source: SourceConfig) {
+        for recording_id in self
+            .workspace
+            .recordings
+            .iter()
+            .filter(|recording| recording.sources.iter().any(|item| item.id == source.id))
+            .map(|recording| recording.id)
+            .collect::<Vec<_>>()
+        {
+            self.video_alignment_jobs.remove(&recording_id);
+            self.video_alignment_results.remove(&recording_id);
+        }
         self.load_serial = self.load_serial.wrapping_add(1);
         let serial = self.load_serial;
         self.loading.insert(source.id, serial);
         let tx = self.tx.clone();
-        let calibration = if source.adapter == "insta360" {
+        let calibration = if is_camera_telemetry_source(&source) {
             self.workspace
                 .recordings
                 .iter()
@@ -510,7 +711,11 @@ impl AnalysisApp {
                     .push(format!("Unsupported file: {}", path.display()));
                 continue;
             }
-            added.push(self.add_telemetry(path));
+            let id = self.add_telemetry(path);
+            added.push(id);
+        }
+        if added.len() > 1 {
+            self.select_imports_pending.extend(added.iter().copied());
         }
         if videos.len() == 1 && (added.len() == 1 || added.is_empty()) {
             if let Some(id) = added.first().copied().or(self.state.selected_recording) {
@@ -527,10 +732,32 @@ impl AnalysisApp {
         }
     }
     fn attach_video(&mut self, id: RecordingId, path: PathBuf) {
+        let mut camera_sources = Vec::new();
         if let Some(r) = self.workspace.recordings.iter_mut().find(|r| r.id == id) {
+            if r.video_path.as_ref() != Some(&path) {
+                for source in r
+                    .sources
+                    .iter_mut()
+                    .filter(|source| is_camera_telemetry_source(source))
+                {
+                    camera_sources.push(source.id);
+                    if let Some(settings) = source.settings.as_object_mut() {
+                        settings.remove(VIDEO_AUDIO_OFFSET_KEY);
+                        settings.remove(VIDEO_AUDIO_PEAK_KEY);
+                        settings.remove(VIDEO_AUDIO_CONFIDENCE_KEY);
+                        settings.remove(VIDEO_ALIGNMENT_APPLIED_KEY);
+                    }
+                }
+            }
             r.video_path = Some(path);
-            self.dirty = true;
         }
+        for source_id in camera_sources {
+            self.video_audio_jobs.remove(&source_id);
+            self.video_audio_results.remove(&source_id);
+        }
+        self.video_alignment_jobs.remove(&id);
+        self.video_alignment_results.remove(&id);
+        self.changed();
     }
     fn poll(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
@@ -590,6 +817,7 @@ impl AnalysisApp {
                         self.prepared = prepared;
                         self.prepared_revision = revision;
                         self.plot_cache.clear();
+                        self.scatter_cache.clear();
                         self.map_cache.clear();
                         ctx.request_repaint();
                     }
@@ -598,11 +826,98 @@ impl AnalysisApp {
                     self.probing.remove(&path);
                     self.metadata.insert(path, result);
                 }
+                Event::VideoAudioAligned(serial, recording_id, source_id, result) => {
+                    if self.video_audio_jobs.get(&source_id) != Some(&serial) {
+                        continue;
+                    }
+                    self.video_audio_jobs.remove(&source_id);
+                    if !self.workspace.recordings.iter().any(|recording| {
+                        recording.id == recording_id
+                            && recording
+                                .sources
+                                .iter()
+                                .any(|source| source.id == source_id)
+                    }) {
+                        continue;
+                    }
+                    self.video_audio_results.insert(source_id, result.clone());
+                    match result {
+                        Ok(alignment) => {
+                            let camera_video_offset = -alignment.offset_seconds;
+                            if let Some(recording) = self
+                                .workspace
+                                .recordings
+                                .iter_mut()
+                                .find(|recording| recording.id == recording_id)
+                                && let Some(source) = recording
+                                    .sources
+                                    .iter_mut()
+                                    .find(|source| source.id == source_id)
+                            {
+                                if !source.settings.is_object() {
+                                    source.settings = json!({});
+                                }
+                                source.settings[VIDEO_AUDIO_OFFSET_KEY] =
+                                    json!(camera_video_offset);
+                                source.settings[VIDEO_AUDIO_PEAK_KEY] =
+                                    json!(alignment.normalized_peak);
+                                source.settings[VIDEO_AUDIO_CONFIDENCE_KEY] =
+                                    json!(alignment.confidence.min(999.0));
+                                if recording.primary_source == source_id {
+                                    recording.video_offset_seconds =
+                                        source.alignment.offset_seconds - camera_video_offset;
+                                    source.settings[VIDEO_ALIGNMENT_APPLIED_KEY] =
+                                        json!(alignment.auto_acceptable());
+                                }
+                            }
+                            self.message = format!(
+                                "Camera audio aligned to the exported video (peak {:.2}, confidence {:.2}){}",
+                                alignment.normalized_peak,
+                                alignment.confidence,
+                                if alignment.auto_acceptable() {
+                                    ""
+                                } else {
+                                    "; inspect before applying telemetry correlation"
+                                }
+                            );
+                            self.changed();
+                        }
+                        Err(error) => {
+                            self.message = format!("Camera/video audio alignment failed: {error}");
+                        }
+                    }
+                }
+                Event::VideoAlignmentEstimated(serial, recording_id, result) => {
+                    if self.video_alignment_jobs.get(&recording_id) != Some(&serial) {
+                        continue;
+                    }
+                    self.video_alignment_jobs.remove(&recording_id);
+                    if !self
+                        .workspace
+                        .recordings
+                        .iter()
+                        .any(|recording| recording.id == recording_id)
+                    {
+                        continue;
+                    }
+                    self.video_alignment_results
+                        .insert(recording_id, result.clone());
+                    self.message = match result {
+                        Ok(candidate) => format!(
+                            "Video alignment estimate: {:+.3}s logger-minus-camera lag, Pearson r {:+.3}; review and apply it in Recordings & laps.",
+                            candidate.result.target_minus_reference_seconds,
+                            candidate.result.correlation_coefficient
+                        ),
+                        Err(error) => format!("Video alignment estimate failed: {error}"),
+                    };
+                }
             }
         }
         if self.loading.is_empty() && self.auto_select_pending {
             self.auto_select_pending = false;
             self.default_selection();
+            let imported = std::mem::take(&mut self.select_imports_pending);
+            self.select_segments_for_recordings(&imported);
             self.auto_mode_pending = self.workspace.course.gates.is_empty()
                 && self.automatic_mode
                 && self
@@ -676,11 +991,56 @@ impl AnalysisApp {
         }
         self.changed();
     }
+    fn retain_valid_selection(&mut self) {
+        self.state
+            .selection
+            .retain(|key| segment(&self.workspace, key).is_some());
+        if self
+            .workspace
+            .reference
+            .as_ref()
+            .is_some_and(|key| segment(&self.workspace, key).is_none())
+        {
+            self.workspace.reference = self.state.selection.first().cloned();
+        }
+        if self
+            .workspace
+            .selected
+            .as_ref()
+            .is_some_and(|key| segment(&self.workspace, key).is_none())
+        {
+            self.workspace.selected = None;
+        }
+    }
+    fn all_segment_keys(&self) -> Vec<SegmentRef> {
+        self.workspace
+            .recordings
+            .iter()
+            .flat_map(|recording| {
+                recording.segments.iter().map(|segment| SegmentRef {
+                    recording_id: recording.id,
+                    segment_id: segment.id,
+                })
+            })
+            .collect()
+    }
+    fn select_segments_for_recordings(&mut self, recording_ids: &HashSet<RecordingId>) {
+        for key in self
+            .all_segment_keys()
+            .into_iter()
+            .filter(|key| recording_ids.contains(&key.recording_id))
+        {
+            if !self.state.selection.contains(&key) {
+                self.state.selection.push(key);
+            }
+        }
+    }
     pub fn ui(&mut self, ui: &mut egui::Ui, tools: Option<&FfmpegTools>, units: UnitSystem) {
         if !self.workspace.settings.is_object() {
             self.workspace.settings = json!({});
         }
         self.poll(ui.ctx());
+        self.start_pending_video_audio_sync(tools);
         let dt = self.last_frame.elapsed().as_secs_f64().min(0.1);
         self.last_frame = Instant::now();
         if self.playing {
@@ -737,10 +1097,11 @@ impl AnalysisApp {
             }
             fn ui(&mut self, ui: &mut egui::Ui, t: &mut Tab) {
                 match &mut t.kind {
-                    TabKind::Browser => self.app.browser(ui),
+                    TabKind::Browser => self.app.browser(ui, self.tools),
                     TabKind::Setup => self.app.setup(ui),
                     TabKind::Stats => self.app.statistics(ui, self.units),
                     TabKind::Plot(p) => self.app.plot(ui, t.id, p, self.units),
+                    TabKind::Scatter(options) => self.app.scatter(ui, t.id, options, self.units),
                     TabKind::Video(v) => self.app.video(ui, t.id, v, self.tools),
                     TabKind::Map { channel, settings } => {
                         self.app.map(ui, t.id, channel, settings, self.units)
@@ -766,6 +1127,7 @@ impl AnalysisApp {
                 .is_some_and(|id| open_ids.contains(&id))
         };
         self.plot_cache.retain(|key, _| cache_is_open(key));
+        self.scatter_cache.retain(|key, _| cache_is_open(key));
         self.map_cache.retain(|key, _| cache_is_open(key));
         self.videos.retain(|id, _| self.visible_videos.contains(id));
         if self.playing {
@@ -821,6 +1183,25 @@ impl AnalysisApp {
         let x = self.x_at_time(reference, reference.start + self.state.cursor)?;
         self.time_at_x(run, x)
     }
+    fn delta_window(&self, run: &PreparedRun) -> (f64, f64) {
+        if self.workspace.course.gates.is_empty() {
+            return (run.start, run.end);
+        }
+        let Some(recording) = self
+            .workspace
+            .recordings
+            .iter()
+            .find(|recording| recording.id == run.key.recording_id)
+        else {
+            return (run.start, run.end);
+        };
+        let Some(data) = self.data.get(&recording.primary_source) else {
+            return (run.start, run.end);
+        };
+        let gps = gps_points(&data.raw, recording);
+        gate_window(&gps, &self.workspace.course.gates, run.start, run.end)
+            .unwrap_or((run.start, run.end))
+    }
     fn scrub_x(&mut self, x: f64) {
         if let Some(r) = self.reference_run()
             && let Some(t) = self.time_at_x(r, x)
@@ -835,13 +1216,21 @@ impl AnalysisApp {
         name: &str,
         options: &PlotOptions,
     ) -> Option<(&'a TelemetryChannel, f64)> {
+        self.source_channel_with_bindings(run, name, &options.bindings)
+    }
+    fn source_channel_with_bindings<'a>(
+        &'a self,
+        run: &PreparedRun,
+        name: &str,
+        bindings: &BTreeMap<String, ChannelRef>,
+    ) -> Option<(&'a TelemetryChannel, f64)> {
         let recording = self
             .workspace
             .recordings
             .iter()
             .find(|r| r.id == run.key.recording_id)?;
         let override_key = format!("{}:{name}", recording.id.0);
-        if let Some(binding) = options.bindings.get(&override_key) {
+        if let Some(binding) = bindings.get(&override_key) {
             let source = recording
                 .sources
                 .iter()
@@ -888,8 +1277,47 @@ impl AnalysisApp {
             .collect::<Vec<_>>();
         names.sort();
         names.dedup();
+        names.push(DELTA_CHANNEL.into());
         names
     }
+}
+
+fn segment_key(segment: &SegmentRef) -> String {
+    format!("{}:{}", segment.recording_id.0, segment.segment_id.0)
+}
+fn gate_window(
+    gps: &[GpsPoint],
+    gates: &[Gate],
+    interval_start: f64,
+    interval_end: f64,
+) -> Option<(f64, f64)> {
+    let starts = gate_crossings(gps, *gates.first()?);
+    let pairs = if gates.len() == 1 {
+        starts
+            .windows(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect::<Vec<_>>()
+    } else {
+        let finishes = gate_crossings(gps, gates[1]);
+        starts
+            .into_iter()
+            .filter_map(|start| {
+                finishes
+                    .iter()
+                    .copied()
+                    .find(|finish| *finish > start + 1.0)
+                    .map(|finish| (start, finish))
+            })
+            .collect()
+    };
+    pairs
+        .into_iter()
+        .filter_map(|pair| {
+            let overlap = (pair.1.min(interval_end) - pair.0.max(interval_start)).max(0.0);
+            (overlap > 0.0).then_some((overlap, pair))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, pair)| pair)
 }
 fn segment<'a>(
     workspace: &'a AnalysisWorkspace,
@@ -923,6 +1351,11 @@ fn is_video(path: &Path) -> bool {
             .as_str(),
         "mp4" | "mov" | "mkv"
     )
+}
+fn is_camera_telemetry_source(source: &SourceConfig) -> bool {
+    // Keep the workflow camera-generic; supported adapters opt into this role
+    // here as they are added.
+    matches!(source.adapter.as_str(), "insta360")
 }
 fn display_unit(unit: Unit, quantity: Quantity, system: UnitSystem) -> Unit {
     system
@@ -1413,6 +1846,116 @@ fn best_effort_time_alignment(
         .or_else(|| onset_time_alignment(workspace, reference, target, data))
 }
 
+fn gps_point_at_time(points: &[GpsPoint], time: f64) -> Option<GpsPoint> {
+    if !time.is_finite() || points.is_empty() {
+        return None;
+    }
+    let index = points.partition_point(|point| point.recording_time < time);
+    if let Some(point) = points.get(index)
+        && (point.recording_time - time).abs() < 1e-9
+    {
+        return Some(*point);
+    }
+    let (left, right) = (points.get(index.checked_sub(1)?)?, points.get(index)?);
+    let duration = right.recording_time - left.recording_time;
+    if !(0.0..=2.0).contains(&duration) || duration <= f64::EPSILON {
+        return None;
+    }
+    let fraction = (time - left.recording_time) / duration;
+    let longitude_delta = (right.longitude - left.longitude + 540.0).rem_euclid(360.0) - 180.0;
+    Some(GpsPoint {
+        recording_time: time,
+        latitude: left.latitude + (right.latitude - left.latitude) * fraction,
+        longitude: (left.longitude + longitude_delta * fraction + 540.0).rem_euclid(360.0) - 180.0,
+        accuracy_meters: left
+            .accuracy_meters
+            .zip(right.accuracy_meters)
+            .map(|(left, right)| left.max(right)),
+    })
+}
+
+fn gps_inside_interval(points: &[GpsPoint], start: f64, end: f64) -> Vec<GpsPoint> {
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return vec![];
+    }
+    let mut clipped = Vec::new();
+    if let Some(point) = gps_point_at_time(points, start) {
+        clipped.push(point);
+    }
+    clipped.extend(
+        points
+            .iter()
+            .copied()
+            .filter(|point| point.recording_time > start && point.recording_time < end),
+    );
+    if let Some(point) = gps_point_at_time(points, end)
+        && clipped
+            .last()
+            .is_none_or(|last| (last.recording_time - end).abs() >= 1e-9)
+    {
+        clipped.push(point);
+    }
+    clipped
+}
+
+fn timed_sample_at_time(
+    samples: &[TimedSample],
+    gaps: &[(f64, f64)],
+    time: f64,
+) -> Option<TimedSample> {
+    if !time.is_finite() || samples.is_empty() {
+        return None;
+    }
+    let index = samples.partition_point(|sample| sample.time < time);
+    if let Some(sample) = samples.get(index)
+        && (sample.time - time).abs() < 1e-9
+    {
+        return Some(*sample);
+    }
+    if gaps.iter().any(|(start, end)| time > *start && time < *end) {
+        return None;
+    }
+    let (left, right) = (samples.get(index.checked_sub(1)?)?, samples.get(index)?);
+    let duration = right.time - left.time;
+    if duration <= f64::EPSILON {
+        return None;
+    }
+    let fraction = (time - left.time) / duration;
+    Some(TimedSample {
+        time,
+        value: left.value + (right.value - left.value) * fraction,
+    })
+}
+
+fn timed_samples_inside_interval(
+    samples: &[TimedSample],
+    gaps: &[(f64, f64)],
+    start: f64,
+    end: f64,
+) -> Vec<TimedSample> {
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return vec![];
+    }
+    let mut clipped = Vec::new();
+    if let Some(sample) = timed_sample_at_time(samples, gaps, start) {
+        clipped.push(sample);
+    }
+    clipped.extend(
+        samples
+            .iter()
+            .copied()
+            .filter(|sample| sample.time > start && sample.time < end),
+    );
+    if let Some(sample) = timed_sample_at_time(samples, gaps, end)
+        && clipped
+            .last()
+            .is_none_or(|last| (last.time - end).abs() >= 1e-9)
+    {
+        clipped.push(sample);
+    }
+    clipped
+}
+
 fn prepare_comparison(
     workspace: &AnalysisWorkspace,
     selection: &[SegmentRef],
@@ -1426,12 +1969,7 @@ fn prepare_comparison(
             .get(&r.primary_source)
             .map(|d| gps_points(&d.raw, r))
             .unwrap_or_default();
-        gps.into_iter()
-            .filter(|p| {
-                p.recording_time >= s.start_recording_time
-                    && p.recording_time <= s.end_recording_time
-            })
-            .collect()
+        gps_inside_interval(&gps, s.start_recording_time, s.end_recording_time)
     };
     let course = workspace
         .reference
@@ -1460,11 +1998,12 @@ fn prepare_comparison(
             let dataset = &data.get(&r.primary_source)?.raw;
             let gps = gps_for(key);
             let traveled = traveled_distance(dataset, r, &gps);
-            let in_range = traveled
-                .samples
-                .iter()
-                .filter(|p| p.time >= s.start_recording_time && p.time <= s.end_recording_time)
-                .collect::<Vec<_>>();
+            let in_range = timed_samples_inside_interval(
+                &traveled.samples,
+                &traveled.gaps,
+                s.start_recording_time,
+                s.end_recording_time,
+            );
             let first = in_range.first().map_or(0.0, |p| p.value);
             let distance = in_range
                 .into_iter()
@@ -1474,7 +2013,7 @@ fn prepare_comparison(
                     confidence: if traveled
                         .gaps
                         .iter()
-                        .any(|(a, b)| p.time > *a && p.time <= *b)
+                        .any(|(a, b)| p.time > *a && p.time < *b)
                     {
                         0.0
                     } else {

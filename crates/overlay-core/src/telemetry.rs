@@ -833,6 +833,36 @@ fn correlation_lag_candidates(
 /// `minimum` seconds gives
 /// `target_min + minimum - reference_max <= lag <=
 /// target_max - minimum - reference_min`.
+/// Returns `None` for invalid/empty inputs or when that minimum overlap is
+/// impossible.
+pub fn feasible_correlation_lag_range(
+    reference: &ChannelSeries,
+    target: &ChannelSeries,
+    minimum: f64,
+) -> Option<(f64, f64)> {
+    if !minimum.is_finite() || minimum < 0.0 {
+        return None;
+    }
+    let reference_min = reference.samples.first()?.time;
+    let reference_max = reference.samples.last()?.time;
+    let target_min = target.samples.first()?.time;
+    let target_max = target.samples.last()?.time;
+    if !reference_min.is_finite()
+        || !reference_max.is_finite()
+        || !target_min.is_finite()
+        || !target_max.is_finite()
+        || reference_max - reference_min < minimum
+        || target_max - target_min < minimum
+    {
+        return None;
+    }
+    let bounds = (
+        target_min + minimum - reference_max,
+        target_max - minimum - reference_min,
+    );
+    (bounds.0 <= bounds.1).then_some(bounds)
+}
+
 fn feasible_lag_bounds(
     reference: &ChannelSeries,
     target: &ChannelSeries,
@@ -1827,6 +1857,20 @@ mod tests {
         let result = correlate_channel_series(&reference, &target, &config).unwrap();
         assert_close(result.target_minus_reference_seconds, expected_lag);
         assert!(result.correlation_coefficient > 0.999);
+    }
+
+    #[test]
+    fn feasible_correlation_range_covers_all_real_overlap() {
+        let reference = regular_series(10.0, 20.0, 0.1, correlation_shape);
+        let target = regular_series(12.0, 25.0, 0.1, correlation_shape);
+
+        let range = feasible_correlation_lag_range(&reference, &target, 2.0).unwrap();
+
+        assert!((range.0 + 6.0).abs() < 1e-9);
+        assert!((range.1 - 13.0).abs() < 1e-9);
+
+        let short = regular_series(0.0, 1.0, 0.1, correlation_shape);
+        assert!(feasible_correlation_lag_range(&short, &target, 2.0).is_none());
     }
 
     #[test]

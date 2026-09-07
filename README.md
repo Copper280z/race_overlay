@@ -14,9 +14,9 @@ tabs, split docks, or floating windows; three layout presets provide quick
 starting points. Analysis workspaces use `.race-analysis.json` files.
 
 **Overlay** retains the original editor and export workflow. Use a recording's
-**Edit overlay / sync** action to calibrate or synchronize its sources, customize
-its dashboard, or export; switching back carries the changes into that recording
-without replacing the other comparisons.
+**Edit overlay / advanced sync** action to calibrate sources, inspect detailed
+timing, customize its dashboard, or export. Switching back carries the changes
+into that recording without replacing the other comparisons.
 
 The editor provides numeric, bar, speed gauge, GPS track map, G-meter, tachometer, temperature,
 lap timer, delta, shift-light, steering/input, and gear widgets. An additive
@@ -36,7 +36,7 @@ video, layout, or other telemetry. GPS track maps support multi-lap circuits
 without drawing duplicate lap paths and point-to-point autocross courses with
 user-captured start and finish markers. Together these tools make camera-axis
 identification and IMU calibration inspectable in the editor.
-Insta360 telemetry is audio-aligned automatically, so every normal control uses
+Supported camera telemetry is audio-aligned automatically, so every normal control uses
 the exported video's timeline.
 
 See [docs/usage.md](docs/usage.md) for setup and the end-to-end workflow.

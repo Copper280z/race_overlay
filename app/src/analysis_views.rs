@@ -1,7 +1,79 @@
 use super::*;
-use crate::analysis_maps::sample_value;
-use egui_plot::{Legend, Line, Plot, VLine};
+use crate::analysis_maps::{color_map, sample_value};
+use egui_plot::{Legend, Line, Plot, Points, VLine};
 use overlay_media::{AnalysisPreviewConfig, PreviewSize};
+
+fn legend_editor(
+    ui: &mut egui::Ui,
+    show: &mut bool,
+    labels: &mut BTreeMap<String, String>,
+    entries: &[(String, String, egui::Color32)],
+) {
+    ui.checkbox(show, "Show legend");
+    if *show {
+        ui.collapsing("Legend text", |ui| {
+            for (key, default, color) in entries {
+                ui.horizontal(|ui| {
+                    ui.colored_label(*color, "●");
+                    let label = labels.entry(key.clone()).or_insert_with(|| default.clone());
+                    ui.add(egui::TextEdit::singleline(label).desired_width(220.0));
+                    if ui.small_button("Reset").clicked() {
+                        *label = default.clone();
+                    }
+                });
+            }
+        });
+    }
+}
+
+fn channel_combo(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    axis: &str,
+    value: &mut String,
+    names: &[String],
+) {
+    ui.label(axis);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(value.as_str())
+        .show_ui(ui, |ui| {
+            for name in names {
+                ui.selectable_value(value, name.clone(), name);
+            }
+        });
+}
+
+fn color_bar(ui: &mut egui::Ui, label: &str, mut range: [f64; 2]) {
+    range = expanded_range(range);
+    ui.horizontal(|ui| {
+        ui.label(format!("{label}: {:.2}", range[0]));
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(120.0, 10.0), egui::Sense::hover());
+        for i in 0..48 {
+            let left = i as f32 / 48.0;
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + rect.width() * left, rect.top()),
+                    egui::pos2(
+                        rect.left() + rect.width() * (left + 1.0 / 48.0),
+                        rect.bottom(),
+                    ),
+                ),
+                0.0,
+                color_map(range[0] + (range[1] - range[0]) * left as f64, range),
+            );
+        }
+        ui.label(format!("{:.2}", range[1]));
+    });
+}
+
+fn expanded_range(range: [f64; 2]) -> [f64; 2] {
+    if range[0] == range[1] {
+        let padding = range[0].abs().max(1.0) * 0.05;
+        [range[0] - padding, range[1] + padding]
+    } else {
+        range
+    }
+}
 
 impl AnalysisApp {
     pub(super) fn plot(
@@ -12,121 +84,144 @@ impl AnalysisApp {
         units: UnitSystem,
     ) {
         let before = serde_json::to_string(options).unwrap_or_default();
-        ui.horizontal_wrapped(|ui| {
-            if !options.delta {
-                ui.menu_button("Channels", |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(250.0)
-                        .show(ui, |ui| {
-                            for name in self.channel_names() {
-                                let mut selected = options.channels.contains(&name);
-                                if ui.checkbox(&mut selected, &name).changed() {
-                                    if selected {
-                                        options.channels.push(name);
+        let legend_entries = self
+            .prepared
+            .runs
+            .iter()
+            .filter(|run| self.state.selection.contains(&run.key))
+            .map(|run| (segment_key(&run.key), run.name.clone(), run.color))
+            .collect::<Vec<_>>();
+        ui.collapsing("Plot controls", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if !options.delta {
+                    ui.menu_button("Channels", |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(250.0)
+                            .show(ui, |ui| {
+                                for name in self.channel_names() {
+                                    let mut selected = options.channels.contains(&name);
+                                    let label = if name == DELTA_CHANNEL {
+                                        DELTA_LABEL
                                     } else {
-                                        options.channels.retain(|n| n != &name);
-                                    }
-                                }
-                            }
-                        });
-                });
-            }
-            let mut enabled = options.filter.is_some();
-            if ui.checkbox(&mut enabled, "Panel zero-phase LPF").changed() {
-                options.filter = enabled.then_some(8.0);
-            }
-            if let Some(hz) = options.filter.as_mut() {
-                ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
-            }
-        });
-        if !options.delta {
-            ui.collapsing("Units and channel matching", |ui| {
-                for name in options.channels.clone() {
-                    let descriptor = self.prepared.runs.iter().find_map(|r| {
-                        self.source_channel(r, &name, options)
-                            .map(|(c, _)| c.descriptor.clone())
-                    });
-                    if let Some(d) = descriptor {
-                        let default = display_unit(d.unit.clone(), d.quantity, units);
-                        let mut target =
-                            options.units.get(&name).cloned().unwrap_or(default.clone());
-                        ui.horizontal(|ui| {
-                            ui.label(&name);
-                            egui::ComboBox::from_id_salt((id, &name, "units"))
-                                .selected_text(target.symbol())
-                                .show_ui(ui, |ui| {
-                                    for u in d.unit.compatible_units() {
-                                        ui.selectable_value(&mut target, u.clone(), u.symbol());
-                                    }
-                                });
-                            if ui.small_button("Default").clicked() {
-                                options.units.remove(&name);
-                            } else if target != default || options.units.contains_key(&name) {
-                                options.units.insert(name.clone(), target);
-                            }
-                        });
-                    }
-                    for recording in &self.workspace.recordings {
-                        if !self
-                            .state
-                            .selection
-                            .iter()
-                            .any(|s| s.recording_id == recording.id)
-                        {
-                            continue;
-                        }
-                        let key = format!("{}:{name}", recording.id.0);
-                        egui::ComboBox::from_id_salt((id, &key))
-                            .selected_text(format!(
-                                "{}: {}",
-                                recording.name,
-                                if options.bindings.contains_key(&key) {
-                                    "manual channel"
-                                } else {
-                                    "automatic"
-                                }
-                            ))
-                            .show_ui(ui, |ui| {
-                                if ui
-                                    .selectable_label(
-                                        !options.bindings.contains_key(&key),
-                                        "Automatic name matching",
-                                    )
-                                    .clicked()
-                                {
-                                    options.bindings.remove(&key);
-                                }
-                                for source in &recording.sources {
-                                    if let Some(d) = self.data.get(&source.id) {
-                                        for channel in d.processed.channels.values() {
-                                            if ui
-                                                .selectable_label(
-                                                    false,
-                                                    format!(
-                                                        "{} / {} ({})",
-                                                        source.name,
-                                                        channel.descriptor.name,
-                                                        channel.descriptor.unit.symbol()
-                                                    ),
-                                                )
-                                                .clicked()
-                                            {
-                                                options.bindings.insert(
-                                                    key.clone(),
-                                                    ChannelRef {
-                                                        source_id: source.id,
-                                                        channel_id: channel.descriptor.id,
-                                                    },
-                                                );
-                                            }
+                                        &name
+                                    };
+                                    if ui.checkbox(&mut selected, label).changed() {
+                                        if selected {
+                                            options.channels.push(name);
+                                        } else {
+                                            options.channels.retain(|n| n != &name);
                                         }
                                     }
                                 }
                             });
-                    }
+                    });
+                }
+                let mut enabled = options.filter.is_some();
+                if ui.checkbox(&mut enabled, "Panel zero-phase LPF").changed() {
+                    options.filter = enabled.then_some(8.0);
+                }
+                if let Some(hz) = options.filter.as_mut() {
+                    ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
                 }
             });
-        }
+            if !options.delta {
+                ui.collapsing("Units and channel matching", |ui| {
+                    for name in options.channels.clone() {
+                        if name == DELTA_CHANNEL {
+                            continue;
+                        }
+                        let descriptor = self.prepared.runs.iter().find_map(|r| {
+                            self.source_channel(r, &name, options)
+                                .map(|(c, _)| c.descriptor.clone())
+                        });
+                        if let Some(d) = descriptor {
+                            let default = display_unit(d.unit.clone(), d.quantity, units);
+                            let mut target =
+                                options.units.get(&name).cloned().unwrap_or(default.clone());
+                            ui.horizontal(|ui| {
+                                ui.label(&name);
+                                egui::ComboBox::from_id_salt((id, &name, "units"))
+                                    .selected_text(target.symbol())
+                                    .show_ui(ui, |ui| {
+                                        for u in d.unit.compatible_units() {
+                                            ui.selectable_value(&mut target, u.clone(), u.symbol());
+                                        }
+                                    });
+                                if ui.small_button("Default").clicked() {
+                                    options.units.remove(&name);
+                                } else if target != default || options.units.contains_key(&name) {
+                                    options.units.insert(name.clone(), target);
+                                }
+                            });
+                        }
+                        for recording in &self.workspace.recordings {
+                            if !self
+                                .state
+                                .selection
+                                .iter()
+                                .any(|s| s.recording_id == recording.id)
+                            {
+                                continue;
+                            }
+                            let key = format!("{}:{name}", recording.id.0);
+                            egui::ComboBox::from_id_salt((id, &key))
+                                .selected_text(format!(
+                                    "{}: {}",
+                                    recording.name,
+                                    if options.bindings.contains_key(&key) {
+                                        "manual channel"
+                                    } else {
+                                        "automatic"
+                                    }
+                                ))
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            !options.bindings.contains_key(&key),
+                                            "Automatic name matching",
+                                        )
+                                        .clicked()
+                                    {
+                                        options.bindings.remove(&key);
+                                    }
+                                    for source in &recording.sources {
+                                        if let Some(d) = self.data.get(&source.id) {
+                                            for channel in d.processed.channels.values() {
+                                                if ui
+                                                    .selectable_label(
+                                                        false,
+                                                        format!(
+                                                            "{} / {} ({})",
+                                                            source.name,
+                                                            channel.descriptor.name,
+                                                            channel.descriptor.unit.symbol()
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    options.bindings.insert(
+                                                        key.clone(),
+                                                        ChannelRef {
+                                                            source_id: source.id,
+                                                            channel_id: channel.descriptor.id,
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                        }
+                    }
+                });
+            }
+            legend_editor(
+                ui,
+                &mut options.show_legend,
+                &mut options.legend_labels,
+                &legend_entries,
+            );
+        });
         if before != serde_json::to_string(options).unwrap_or_default() {
             self.dirty = true;
             self.plot_cache.clear();
@@ -136,7 +231,7 @@ impl AnalysisApp {
             return;
         }
         let channels = if options.delta {
-            vec!["Time delta — positive is slower".to_string()]
+            vec![DELTA_CHANNEL.to_string()]
         } else {
             options.channels.clone()
         };
@@ -161,7 +256,12 @@ impl AnalysisApp {
                 }
                 let traces = self.plot_cache.get(&cache_key).unwrap().clone();
                 let unit = traces.first().map_or("", |t| t.unit.symbol());
-                ui.label(format!("{name} ({unit})"));
+                let display_name = if name == DELTA_CHANNEL {
+                    DELTA_LABEL
+                } else {
+                    &name
+                };
+                ui.label(format!("{display_name} ({unit})"));
                 if traces.is_empty() {
                     ui.weak("No compatible channel / valid alignment for selected runs.");
                     continue;
@@ -182,50 +282,81 @@ impl AnalysisApp {
                     XMode::Distance => "Each run's traveled meters",
                     XMode::Course => "Reference-course meters",
                 };
-                let response = Plot::new((id, &name, self.effective_mode().label()))
+                let mut plot_widget = Plot::new((id, &name, self.effective_mode().label()))
                     .height(height)
-                    .legend(Legend::default())
+                    .allow_zoom([true, false])
+                    .allow_scroll([true, false])
+                    // Gesture zoom is intentionally X-only, but dragging an
+                    // axis should still scale that axis directly. Y remains
+                    // independent because only X is linked between plots.
+                    .allow_axis_zoom_drag([true, true])
+                    .allow_boxed_zoom(false)
                     .link_axis(
                         egui::Id::new(("analysis-x", self.effective_mode().label())),
                         [true, false],
                     )
-                    .x_axis_label(x_label)
-                    .show(ui, |plot| {
-                        for trace in traces.iter() {
-                            for piece in &trace.points {
-                                if piece.len() > 1 {
-                                    plot.line(
-                                        Line::new(&trace.name, piece.clone()).color(trace.color),
-                                    );
-                                }
+                    .x_axis_label(x_label);
+                if options.show_legend {
+                    plot_widget = plot_widget.legend(Legend::default());
+                }
+                let response = plot_widget.show(ui, |plot| {
+                    for trace in traces.iter() {
+                        let label = options
+                            .legend_labels
+                            .get(&segment_key(&trace.segment))
+                            .filter(|label| !label.trim().is_empty())
+                            .unwrap_or(&trace.name);
+                        for piece in &trace.points {
+                            if piece.len() > 1 {
+                                plot.line(Line::new(label, piece.clone()).color(trace.color));
                             }
                         }
-                        if let Some(x) = cursor {
-                            plot.vline(VLine::new("playhead", x).color(egui::Color32::WHITE));
-                        }
-                        if let Some(range) = self.state.range
-                            && let Some(r) = self.reference_run()
-                        {
-                            for t in range {
-                                if let Some(x) = self.x_at_time(r, r.start + t) {
-                                    plot.vline(VLine::new("range", x).color(egui::Color32::GRAY));
-                                }
+                    }
+                    if let Some(x) = cursor {
+                        plot.vline(VLine::new("playhead", x).color(egui::Color32::WHITE));
+                    }
+                    if let Some(range) = self.state.range
+                        && let Some(r) = self.reference_run()
+                    {
+                        for t in range {
+                            if let Some(x) = self.x_at_time(r, r.start + t) {
+                                plot.vline(VLine::new("range", x).color(egui::Color32::GRAY));
                             }
                         }
-                        if (plot.response().clicked()
-                            || plot.response().dragged_by(egui::PointerButton::Primary))
-                            && let Some(p) = plot.pointer_coordinate()
-                        {
-                            Some(p.x)
-                        } else {
-                            None
-                        }
-                    });
+                    }
+                    if (plot.response().clicked()
+                        || plot.response().dragged_by(egui::PointerButton::Primary))
+                        && let Some(p) = plot.pointer_coordinate()
+                    {
+                        Some(p.x)
+                    } else {
+                        None
+                    }
+                });
+                response.response.context_menu(|ui| {
+                    ui.checkbox(&mut options.show_legend, "Show legend");
+                    ui.separator();
+                    ui.label("Legend text");
+                    for (key, default, color) in &legend_entries {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(*color, "●");
+                            let label = options
+                                .legend_labels
+                                .entry(key.clone())
+                                .or_insert_with(|| default.clone());
+                            ui.add(egui::TextEdit::singleline(label).desired_width(180.0));
+                        });
+                    }
+                    ui.weak("Double-click a plot to reset its view.");
+                });
                 if let Some(x) = response.inner {
                     self.scrub_x(x);
                 }
             }
         });
+        if before != serde_json::to_string(options).unwrap_or_default() {
+            self.dirty = true;
+        }
     }
     pub(super) fn build_plot(
         &self,
@@ -239,25 +370,33 @@ impl AnalysisApp {
             if !self.state.selection.contains(&run.key) {
                 continue;
             }
-            let (samples, unit, gap) = if options.delta {
+            let (samples, unit, gap) = if options.delta || name == DELTA_CHANNEL {
                 let Some(reference) = self.reference_run() else {
                     continue;
                 };
+                let reference_window = self.delta_window(reference);
+                let run_window = self.delta_window(run);
                 let mut values = reference
                     .progress
                     .iter()
+                    .filter(|point| {
+                        point.recording_time >= reference_window.0
+                            && point.recording_time <= reference_window.1
+                    })
                     .map(|p| {
                         let other = if run.key == reference.key {
                             Some(p.recording_time)
                         } else {
                             time_at_progress(&run.progress, p.progress)
+                                .filter(|time| *time >= run_window.0 && *time <= run_window.1)
                         };
                         let x = self.x_at_time(reference, p.recording_time);
                         let value = if p.confidence > 0.0 {
                             x.zip(other).map(|(x, other)| {
                                 [
                                     x,
-                                    (other - run.start) - (p.recording_time - reference.start),
+                                    (other - run_window.0)
+                                        - (p.recording_time - reference_window.0),
                                 ]
                             })
                         } else {
@@ -266,6 +405,21 @@ impl AnalysisApp {
                         (p.recording_time, value.unwrap_or([f64::NAN; 2]))
                     })
                     .collect::<Vec<_>>();
+                if !self.workspace.course.gates.is_empty()
+                    && let Some(baseline) = values
+                        .iter()
+                        .find_map(|(_, point)| point[1].is_finite().then_some(point[1]))
+                {
+                    // Gate-defined runs share a meaningful start line. Rebase
+                    // the comparison at the first jointly covered course
+                    // position so GPS sample cadence cannot introduce a
+                    // non-zero delta at the start gate.
+                    for (_, point) in &mut values {
+                        if point[1].is_finite() {
+                            point[1] -= baseline;
+                        }
+                    }
+                }
                 if let Some(hz) = options.filter {
                     // Do not smooth across explicit GPS match failures, even
                     // when their duration is shorter than the usual gap limit.
@@ -313,7 +467,7 @@ impl AnalysisApp {
                     None
                 };
                 let series = filtered.as_ref().unwrap_or(&channel.series);
-                let values = series
+                let mut values = series
                     .samples
                     .iter()
                     .filter_map(|p| {
@@ -328,6 +482,30 @@ impl AnalysisApp {
                         Some((t, [x, y]))
                     })
                     .collect::<Vec<_>>();
+                for recording_time in [run.start, run.end] {
+                    if values
+                        .iter()
+                        .any(|(time, _)| (*time - recording_time).abs() < 1e-8)
+                    {
+                        continue;
+                    }
+                    let Some(value) = series.sample_at_default(
+                        recording_time + offset,
+                        channel.descriptor.interpolation,
+                    ) else {
+                        continue;
+                    };
+                    let Some(y) =
+                        Unit::convert_value(value, &channel.descriptor.unit, &target).ok()
+                    else {
+                        continue;
+                    };
+                    values.push((
+                        recording_time,
+                        [self.x_at_time(run, recording_time).unwrap_or(f64::NAN), y],
+                    ));
+                }
+                values.sort_by(|a, b| a.0.total_cmp(&b.0));
                 (values, target, channel.series.gap_seconds.unwrap_or(2.0))
             };
             let mut pieces = vec![];
@@ -352,6 +530,7 @@ impl AnalysisApp {
                 pieces.push(piece);
             }
             result.push(PlotTrace {
+                segment: run.key.clone(),
                 name: run.name.clone(),
                 color: run.color,
                 points: pieces,
@@ -360,6 +539,269 @@ impl AnalysisApp {
         }
         result
     }
+
+    pub(super) fn scatter(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: u64,
+        options: &mut ScatterOptions,
+        units: UnitSystem,
+    ) {
+        let before = serde_json::to_string(options).unwrap_or_default();
+        let names = self
+            .channel_names()
+            .into_iter()
+            .filter(|name| name != DELTA_CHANNEL)
+            .collect::<Vec<_>>();
+        let legend_entries = self
+            .prepared
+            .runs
+            .iter()
+            .filter(|run| self.state.selection.contains(&run.key))
+            .map(|run| (segment_key(&run.key), run.name.clone(), run.color))
+            .collect::<Vec<_>>();
+        ui.collapsing("Scatter controls", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                channel_combo(ui, (id, "scatter-x"), "X", &mut options.x_channel, &names);
+                channel_combo(ui, (id, "scatter-y"), "Y", &mut options.y_channel, &names);
+                let mut use_z = options.z_channel.is_some();
+                if ui.checkbox(&mut use_z, "Color by Z").changed() {
+                    options.z_channel = use_z.then(|| "gps_speed".into());
+                }
+                if let Some(z) = options.z_channel.as_mut() {
+                    channel_combo(ui, (id, "scatter-z"), "Z", z, &names);
+                }
+                let mut filter = options.filter.is_some();
+                if ui.checkbox(&mut filter, "Zero-phase LPF").changed() {
+                    options.filter = filter.then_some(8.0);
+                }
+                if let Some(hz) = options.filter.as_mut() {
+                    ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
+                }
+            });
+            legend_editor(
+                ui,
+                &mut options.show_legend,
+                &mut options.legend_labels,
+                &legend_entries,
+            );
+        });
+
+        let cache_key = format!(
+            "{id}:{}:{units:?}:{}",
+            self.prepared_revision,
+            serde_json::to_string(options).unwrap_or_default()
+        );
+        if !self.scatter_cache.contains_key(&cache_key) {
+            self.scatter_cache
+                .retain(|key, _| !key.starts_with(&format!("{id}:")));
+            let traces = self.build_scatter(options, units);
+            self.scatter_cache
+                .insert(cache_key.clone(), Arc::new(traces));
+        }
+        let traces = self.scatter_cache.get(&cache_key).unwrap().clone();
+        if traces.is_empty() {
+            ui.label("No selected run has compatible X and Y channels with overlapping samples.");
+            if before != serde_json::to_string(options).unwrap_or_default() {
+                self.dirty = true;
+            }
+            return;
+        }
+        let x_unit = self.scatter_unit(&options.x_channel, options, units);
+        let y_unit = self.scatter_unit(&options.y_channel, options, units);
+        let z_range = options.z_channel.as_ref().and_then(|_| {
+            traces
+                .iter()
+                .flat_map(|trace| trace.points.iter().map(|point| point[2]))
+                .filter(|value| value.is_finite())
+                .fold(None::<[f64; 2]>, |range, value| match range {
+                    None => Some([value, value]),
+                    Some([low, high]) => Some([low.min(value), high.max(value)]),
+                })
+                .map(expanded_range)
+        });
+        if let (Some(z), Some(range)) = (&options.z_channel, z_range) {
+            color_bar(ui, z, range);
+        }
+        let mut plot_widget = Plot::new((id, "scatter"))
+            .x_axis_label(format!(
+                "{} ({})",
+                options.x_channel,
+                x_unit.as_ref().map_or("", Unit::symbol)
+            ))
+            .y_axis_label(format!(
+                "{} ({})",
+                options.y_channel,
+                y_unit.as_ref().map_or("", Unit::symbol)
+            ))
+            .allow_boxed_zoom(false);
+        if options.show_legend {
+            plot_widget = plot_widget.legend(Legend::default());
+        }
+        let response = plot_widget.show(ui, |plot| {
+            for trace in traces.iter() {
+                let label = options
+                    .legend_labels
+                    .get(&segment_key(&trace.segment))
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or(&trace.name);
+                if let Some(range) = z_range {
+                    let mut named = false;
+                    for bin in 0..24 {
+                        let low = range[0] + (range[1] - range[0]) * bin as f64 / 24.0;
+                        let high = range[0] + (range[1] - range[0]) * (bin + 1) as f64 / 24.0;
+                        let points = trace
+                            .points
+                            .iter()
+                            .filter(|point| {
+                                point[2] >= low
+                                    && (point[2] < high || (bin == 23 && point[2] <= high))
+                            })
+                            .map(|point| [point[0], point[1]])
+                            .collect::<Vec<_>>();
+                        if !points.is_empty() {
+                            let name = if named { "" } else { label };
+                            named = true;
+                            plot.points(
+                                Points::new(name, points)
+                                    .radius(2.0)
+                                    .color(color_map((low + high) * 0.5, range)),
+                            );
+                        }
+                    }
+                } else {
+                    let points = trace
+                        .points
+                        .iter()
+                        .map(|point| [point[0], point[1]])
+                        .collect::<Vec<_>>();
+                    plot.points(Points::new(label, points).radius(2.0).color(trace.color));
+                }
+            }
+        });
+        response.response.context_menu(|ui| {
+            ui.checkbox(&mut options.show_legend, "Show legend");
+            ui.separator();
+            ui.label("Legend text");
+            for (key, default, color) in &legend_entries {
+                ui.horizontal(|ui| {
+                    ui.colored_label(*color, "●");
+                    let label = options
+                        .legend_labels
+                        .entry(key.clone())
+                        .or_insert_with(|| default.clone());
+                    ui.add(egui::TextEdit::singleline(label).desired_width(180.0));
+                });
+            }
+            ui.weak("Double-click the plot to reset its view.");
+        });
+        if before != serde_json::to_string(options).unwrap_or_default() {
+            self.dirty = true;
+        }
+    }
+
+    fn scatter_unit(
+        &self,
+        name: &str,
+        options: &ScatterOptions,
+        units: UnitSystem,
+    ) -> Option<Unit> {
+        options.units.get(name).cloned().or_else(|| {
+            self.prepared.runs.iter().find_map(|run| {
+                self.source_channel_with_bindings(run, name, &options.bindings)
+                    .map(|(channel, _)| {
+                        display_unit(
+                            channel.descriptor.unit.clone(),
+                            channel.descriptor.quantity.clone(),
+                            units,
+                        )
+                    })
+            })
+        })
+    }
+
+    pub(super) fn build_scatter(
+        &self,
+        options: &ScatterOptions,
+        units: UnitSystem,
+    ) -> Vec<ScatterTrace> {
+        let x_unit = self.scatter_unit(&options.x_channel, options, units);
+        let y_unit = self.scatter_unit(&options.y_channel, options, units);
+        let z_unit = options
+            .z_channel
+            .as_ref()
+            .and_then(|name| self.scatter_unit(name, options, units));
+        self.prepared
+            .runs
+            .iter()
+            .filter(|run| self.state.selection.contains(&run.key))
+            .filter_map(|run| {
+                let (x, x_offset) =
+                    self.source_channel_with_bindings(run, &options.x_channel, &options.bindings)?;
+                let (y, y_offset) =
+                    self.source_channel_with_bindings(run, &options.y_channel, &options.bindings)?;
+                let z = match options.z_channel.as_ref() {
+                    Some(name) => {
+                        Some(self.source_channel_with_bindings(run, name, &options.bindings)?)
+                    }
+                    None => None,
+                };
+                let filtered = |channel: &TelemetryChannel| {
+                    if channel.descriptor.interpolation == Interpolation::Linear {
+                        options
+                            .filter
+                            .and_then(|hz| channel.series.low_pass_hz(hz).ok())
+                            .unwrap_or_else(|| channel.series.clone())
+                    } else {
+                        channel.series.clone()
+                    }
+                };
+                let x_series = filtered(x);
+                let y_series = filtered(y);
+                let z_series = z.map(|(channel, offset)| (filtered(channel), channel, offset));
+                let step = (x_series.samples.len() / 12_000).max(1);
+                let points = x_series
+                    .samples
+                    .iter()
+                    .step_by(step)
+                    .filter_map(|sample| {
+                        let recording_time = sample.time - x_offset;
+                        if recording_time < run.start || recording_time > run.end {
+                            return None;
+                        }
+                        let x_value =
+                            Unit::convert_value(sample.value, &x.descriptor.unit, x_unit.as_ref()?)
+                                .ok()?;
+                        let y_value = y_series.sample_at_default(
+                            recording_time + y_offset,
+                            y.descriptor.interpolation,
+                        )?;
+                        let y_value =
+                            Unit::convert_value(y_value, &y.descriptor.unit, y_unit.as_ref()?)
+                                .ok()?;
+                        let z_value = if let Some((series, channel, offset)) = &z_series {
+                            let value = series.sample_at_default(
+                                recording_time + *offset,
+                                channel.descriptor.interpolation,
+                            )?;
+                            Unit::convert_value(value, &channel.descriptor.unit, z_unit.as_ref()?)
+                                .ok()?
+                        } else {
+                            0.0
+                        };
+                        Some([x_value, y_value, z_value])
+                    })
+                    .collect::<Vec<_>>();
+                (!points.is_empty()).then(|| ScatterTrace {
+                    segment: run.key.clone(),
+                    name: run.name.clone(),
+                    color: run.color,
+                    points,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn video(
         &mut self,
         ui: &mut egui::Ui,
@@ -554,47 +996,99 @@ impl AnalysisApp {
         units: UnitSystem,
     ) {
         let settings_before = serde_json::to_string(&(&*channel, &*settings)).unwrap_or_default();
-        egui::ComboBox::from_id_salt((id, "map-channel"))
-            .selected_text(channel.as_str())
-            .show_ui(ui, |ui| {
-                for name in self.channel_names() {
-                    ui.selectable_value(channel, name.clone(), name);
+        ui.horizontal(|ui| {
+            let label = if settings.controls_expanded {
+                "▼ Map controls"
+            } else {
+                "▶ Map controls"
+            };
+            if ui
+                .selectable_label(settings.controls_expanded, label)
+                .clicked()
+            {
+                settings.controls_expanded = !settings.controls_expanded;
+            }
+            ui.weak(match settings.color_mode {
+                MapColorMode::Value => format!("Channel colormap · {channel}"),
+                MapColorMode::Run => "Solid color by run".into(),
+            });
+        });
+        if settings.controls_expanded {
+            ui.horizontal_wrapped(|ui| {
+                egui::ComboBox::from_id_salt((id, "map-color-mode"))
+                    .selected_text(match settings.color_mode {
+                        MapColorMode::Value => "Channel colormap",
+                        MapColorMode::Run => "Solid color by run",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut settings.color_mode,
+                            MapColorMode::Value,
+                            "Channel colormap",
+                        );
+                        ui.selectable_value(
+                            &mut settings.color_mode,
+                            MapColorMode::Run,
+                            "Solid color by run",
+                        );
+                    });
+                if settings.color_mode == MapColorMode::Value {
+                    egui::ComboBox::from_id_salt((id, "map-channel"))
+                        .selected_text(channel.as_str())
+                        .show_ui(ui, |ui| {
+                            for name in self
+                                .channel_names()
+                                .into_iter()
+                                .filter(|name| name != DELTA_CHANNEL)
+                            {
+                                ui.selectable_value(channel, name.clone(), name);
+                            }
+                        });
+                    let descriptor = self.prepared.runs.iter().find_map(|r| {
+                        self.source_channel(r, channel, &PlotOptions::default())
+                            .map(|(c, _)| c.descriptor.clone())
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        let mut enabled = settings.low_pass_hz.is_some();
+                        if ui
+                            .checkbox(&mut enabled, "Map value zero-phase LPF")
+                            .changed()
+                        {
+                            settings.low_pass_hz = enabled.then_some(8.0);
+                        }
+                        if let Some(hz) = settings.low_pass_hz.as_mut() {
+                            ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
+                        }
+                        if let Some(d) = &descriptor {
+                            let default = display_unit(d.unit.clone(), d.quantity.clone(), units);
+                            let mut target = settings
+                                .display_unit
+                                .clone()
+                                .filter(|u| d.unit.compatible_units().contains(u))
+                                .unwrap_or_else(|| default.clone());
+                            egui::ComboBox::from_id_salt((id, "map-unit"))
+                                .selected_text(target.symbol())
+                                .show_ui(ui, |ui| {
+                                    for unit in d.unit.compatible_units() {
+                                        ui.selectable_value(
+                                            &mut target,
+                                            unit.clone(),
+                                            unit.symbol(),
+                                        );
+                                    }
+                                });
+                            settings.display_unit = (target != default).then_some(target);
+                            if ui.small_button("Default unit").clicked() {
+                                settings.display_unit = None;
+                            }
+                        }
+                    });
                 }
             });
+        }
         let descriptor = self.prepared.runs.iter().find_map(|r| {
             self.source_channel(r, channel, &PlotOptions::default())
                 .map(|(c, _)| c.descriptor.clone())
-        });
-        ui.horizontal_wrapped(|ui| {
-            let mut enabled = settings.low_pass_hz.is_some();
-            if ui
-                .checkbox(&mut enabled, "Map value zero-phase LPF")
-                .changed()
-            {
-                settings.low_pass_hz = enabled.then_some(8.0);
-            }
-            if let Some(hz) = settings.low_pass_hz.as_mut() {
-                ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
-            }
-            if let Some(d) = &descriptor {
-                let default = display_unit(d.unit.clone(), d.quantity.clone(), units);
-                let mut target = settings
-                    .display_unit
-                    .clone()
-                    .filter(|u| d.unit.compatible_units().contains(u))
-                    .unwrap_or_else(|| default.clone());
-                egui::ComboBox::from_id_salt((id, "map-unit"))
-                    .selected_text(target.symbol())
-                    .show_ui(ui, |ui| {
-                        for unit in d.unit.compatible_units() {
-                            ui.selectable_value(&mut target, unit.clone(), unit.symbol());
-                        }
-                    });
-                settings.display_unit = (target != default).then_some(target);
-                if ui.small_button("Default unit").clicked() {
-                    settings.display_unit = None;
-                }
-            }
         });
         let target_unit = descriptor.map(|d| {
             settings

@@ -49,15 +49,37 @@ pub enum ToolError {
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    for dir in env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
+    if let Some(path) = env::var_os("PATH") {
+        for dir in env::split_paths(&path) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            #[cfg(windows)]
+            for ext in [".exe", ".cmd", ".bat"] {
+                let candidate = dir.join(format!("{name}{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
         }
-        #[cfg(windows)]
-        for ext in [".exe", ".cmd", ".bat"] {
-            let candidate = dir.join(format!("{name}{ext}"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Finder-launched application bundles receive a minimal PATH which
+        // normally excludes both Apple Silicon and Intel Homebrew prefixes.
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let candidate = Path::new(dir).join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        // Also support a future self-contained distribution which places the
+        // tools in Race Overlay.app/Contents/Resources.
+        if let Ok(executable) = env::current_exe()
+            && let Some(contents) = executable.parent().and_then(Path::parent)
+        {
+            let candidate = contents.join("Resources").join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }

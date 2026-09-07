@@ -4,8 +4,32 @@ pub(super) fn replace_segments_preserving_identity(
     recording: &mut Recording,
     mut segments: Vec<RunSegment>,
 ) {
-    for (segment, previous) in segments.iter_mut().zip(&recording.segments) {
-        segment.id = previous.id;
+    let mut available = (0..recording.segments.len()).collect::<Vec<_>>();
+    for segment in &mut segments {
+        let best = available.iter().enumerate().max_by(|(_, a), (_, b)| {
+            let score = |index: usize| {
+                let previous = &recording.segments[index];
+                let overlap = (segment.end_recording_time.min(previous.end_recording_time)
+                    - segment
+                        .start_recording_time
+                        .max(previous.start_recording_time))
+                .max(0.0);
+                let boundary_error = (segment.start_recording_time - previous.start_recording_time)
+                    .abs()
+                    + (segment.end_recording_time - previous.end_recording_time).abs();
+                (overlap > 0.0, overlap, -boundary_error)
+            };
+            let left = score(**a);
+            let right = score(**b);
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+                .then_with(|| left.2.total_cmp(&right.2))
+        });
+        if let Some((available_index, previous_index)) = best {
+            segment.id = recording.segments[*previous_index].id;
+            available.swap_remove(available_index);
+        }
     }
     recording.segments = segments;
 }
@@ -101,6 +125,7 @@ impl AnalysisApp {
             ui.menu_button("Panels / layout", |ui| {
                 for (label, kind) in [
                     ("Channel plot", TabKind::Plot(Default::default())),
+                    ("X/Y scatter plot", TabKind::Scatter(Default::default())),
                     (
                         "Delta plot",
                         TabKind::Plot(PlotOptions {
@@ -174,6 +199,7 @@ impl AnalysisApp {
                 {
                     self.automatic_mode = false;
                     self.plot_cache.clear();
+                    self.scatter_cache.clear();
                     self.dirty = true;
                 }
             }
@@ -193,6 +219,7 @@ impl AnalysisApp {
                 egui::Slider::new(&mut self.state.cursor, 0.0..=duration)
                     .text("Reference elapsed s"),
             );
+            ui.weak("←/→ frame/sample");
             if ui.button("Range start").clicked() {
                 self.state
                     .range
@@ -209,51 +236,233 @@ impl AnalysisApp {
             }
         });
     }
-    pub(super) fn browser(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn browser(&mut self, ui: &mut egui::Ui, tools: Option<&FfmpegTools>) {
         let mut changes = false;
         let mut attach = None;
         let mut overlay = None;
         let mut pending_video = None;
-        egui::ScrollArea::vertical().show(ui,|ui|{
-            if self.workspace.recordings.is_empty(){ui.heading("Start with your data");ui.label("Drop multiple XRK files here. Circuit laps appear automatically; autocross gets an estimated driving interval. No track setup required.");}
-            for recording in &mut self.workspace.recordings {
-                ui.push_id(recording.id.0,|ui|{
-                    let selected=self.state.selected_recording==Some(recording.id);
-                    if ui.selectable_label(selected,&recording.name).clicked(){self.state.selected_recording=Some(recording.id);}
-                    if selected {changes|=ui.text_edit_singleline(&mut recording.name).changed();ui.horizontal_wrapped(|ui|{
-                        if ui.button("Attach video…").clicked(){attach=Some(recording.id);}
-                        if ui.add_enabled(recording.video_path.is_some(),egui::Button::new("Edit overlay / sync")).clicked(){overlay=Some(recording.id);}
-                        if ui.button("Remove…").clicked(){self.remove_recording=Some(recording.id);}
-                    });
-                    if let Some(path)=&recording.video_path{ui.small(path.file_name().unwrap_or_default().to_string_lossy());}
-                    if let Some(paths)=self.workspace.settings.get("unassigned_videos").and_then(Value::as_array){
-                        egui::ComboBox::from_id_salt("unpaired").selected_text("Pair an imported video…").show_ui(ui,|ui|{for v in paths {if let Some(p)=v.as_str() && ui.selectable_label(false,Path::new(p).file_name().unwrap_or_default().to_string_lossy()).clicked(){pending_video=Some((recording.id,PathBuf::from(p)));}}});
-                    }}
-                    for seg in &recording.segments {
-                        let key=SegmentRef{recording_id:recording.id,segment_id:seg.id};let mut checked=self.state.selection.contains(&key);
-                        ui.horizontal(|ui|{
-                            if ui.checkbox(&mut checked,format!("{} · {:.3}s{}",seg.name,seg.duration(),if seg.estimated{" (estimated)"}else{""})).changed(){if checked{self.state.selection.push(key.clone());}else{self.state.selection.retain(|k|k!=&key);}changes=true;}
-                            if ui.selectable_label(self.workspace.reference.as_ref()==Some(&key),"Ref").on_hover_text("Pin this run as the comparison reference").clicked(){self.workspace.reference=Some(key.clone());if !self.state.selection.contains(&key){self.state.selection.push(key);}self.state.cursor=0.0;changes=true;}
+        let all_keys = self.all_segment_keys();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !all_keys.is_empty()
+                        && all_keys
+                            .iter()
+                            .any(|key| !self.state.selection.contains(key)),
+                    egui::Button::new("Select all"),
+                )
+                .clicked()
+            {
+                self.state.selection = all_keys.clone();
+                changes = true;
+            }
+            if ui
+                .add_enabled(
+                    !self.state.selection.is_empty(),
+                    egui::Button::new("Deselect all"),
+                )
+                .clicked()
+            {
+                self.state.selection.clear();
+                changes = true;
+            }
+            ui.weak(format!(
+                "{} of {} selected",
+                self.state.selection.len(),
+                all_keys.len()
+            ));
+        });
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if self.workspace.recordings.is_empty() {
+                ui.heading("Start with your data");
+                ui.label("Drop multiple XRK files here. Circuit laps appear automatically; autocross gets an estimated driving interval. No track setup required.");
+            }
+            let recording_ids = self
+                .workspace
+                .recordings
+                .iter()
+                .map(|recording| recording.id)
+                .collect::<Vec<_>>();
+            for recording_id in recording_ids {
+                ui.push_id(recording_id.0, |ui| {
+                    let Some(recording_index) = self
+                        .workspace
+                        .recordings
+                        .iter()
+                        .position(|recording| recording.id == recording_id)
+                    else {
+                        return;
+                    };
+                    let name = self.workspace.recordings[recording_index].name.clone();
+                    let was_selected = self.state.selected_recording == Some(recording_id);
+                    if ui.selectable_label(was_selected, name).clicked() {
+                        self.state.selected_recording = Some(recording_id);
+                    }
+                    let selected = self.state.selected_recording == Some(recording_id);
+                    if selected {
+                        let recording = &mut self.workspace.recordings[recording_index];
+                        changes |= ui.text_edit_singleline(&mut recording.name).changed();
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Attach video…").clicked() {
+                                attach = Some(recording_id);
+                            }
+                            if ui
+                                .add_enabled(
+                                    recording.video_path.is_some(),
+                                    egui::Button::new("Edit overlay / advanced sync"),
+                                )
+                                .clicked()
+                            {
+                                overlay = Some(recording_id);
+                            }
+                            if ui.button("Remove…").clicked() {
+                                self.remove_recording = Some(recording_id);
+                            }
                         });
-                        if !seg.competitive{ui.weak("Out/in or noncompetitive — available for inspection");}
-                        if let Some(run)=self.prepared.runs.iter().find(|r|r.key.recording_id==recording.id && r.key.segment_id==seg.id) {
-                            if run.progress.is_empty(){ui.weak("No GPS course match — use elapsed time or traveled distance.");}
-                            else {let valid=run.progress.iter().filter(|p|p.confidence>0.0).count();ui.weak(format!("Course match: {:.0}% of GPS samples",valid as f64/run.progress.len() as f64*100.0)).on_hover_text("Matching coverage, not statistical accuracy. Use actual GPS view to inspect the route; anchors can help ambiguous sections.");}
-                            if self.prepared.automatic_time_alignment {
-                                if self.workspace.reference.as_ref()==Some(&run.key) {ui.weak("Time alignment: reference clock");}
-                                else if let Some(alignment)=&run.time_alignment {
-                                    let details=match (alignment.distance_offset_meters,alignment.coefficient) {
-                                        (Some(distance),Some(coefficient))=>format!("distance shift {distance:+.1}m · start shift {:+.2}s · r {coefficient:+.3}",alignment.offset_seconds),
-                                        _=>format!("start shift {:+.2}s",alignment.offset_seconds),
-                                    };
-                                    ui.weak(format!("Time alignment: {} · {details}",alignment.channel)).on_hover_text("Best-effort comparison shift only; source and video timestamps were not changed.");
+                        if let Some(path) = &recording.video_path {
+                            ui.small(path.file_name().unwrap_or_default().to_string_lossy());
+                        }
+                    }
+                    if selected
+                        && let Some(paths) = self
+                            .workspace
+                            .settings
+                            .get("unassigned_videos")
+                            .and_then(Value::as_array)
+                    {
+                        egui::ComboBox::from_id_salt("unpaired")
+                            .selected_text("Pair an imported video…")
+                            .show_ui(ui, |ui| {
+                                for value in paths {
+                                    if let Some(path) = value.as_str()
+                                        && ui
+                                            .selectable_label(
+                                                false,
+                                                Path::new(path)
+                                                    .file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy(),
+                                            )
+                                            .clicked()
+                                    {
+                                        pending_video =
+                                            Some((recording_id, PathBuf::from(path)));
+                                    }
                                 }
-                                else if run.distance.len() >= 2 {ui.colored_label(egui::Color32::LIGHT_RED,"Time alignment unavailable — use traveled distance");}
-                                else {ui.colored_label(egui::Color32::LIGHT_RED,"Time alignment unavailable — using segment-relative time");}
+                            });
+                    }
+                    if selected {
+                        self.video_alignment_ui(ui, tools, recording_id);
+                    }
+                    let recording = &self.workspace.recordings[recording_index];
+                    for segment in &recording.segments {
+                        let key = SegmentRef {
+                            recording_id,
+                            segment_id: segment.id,
+                        };
+                        let mut checked = self.state.selection.contains(&key);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .checkbox(
+                                    &mut checked,
+                                    format!(
+                                        "{} · {:.3}s{}",
+                                        segment.name,
+                                        segment.duration(),
+                                        if segment.estimated { " (estimated)" } else { "" }
+                                    ),
+                                )
+                                .changed()
+                            {
+                                if checked {
+                                    self.state.selection.push(key.clone());
+                                } else {
+                                    self.state.selection.retain(|item| item != &key);
+                                }
+                                changes = true;
+                            }
+                            if ui
+                                .selectable_label(
+                                    self.workspace.reference.as_ref() == Some(&key),
+                                    "Ref",
+                                )
+                                .on_hover_text("Pin this run as the comparison reference")
+                                .clicked()
+                            {
+                                self.workspace.reference = Some(key.clone());
+                                if !self.state.selection.contains(&key) {
+                                    self.state.selection.push(key);
+                                }
+                                self.state.cursor = 0.0;
+                                changes = true;
+                            }
+                        });
+                        if checked {
+                            if !segment.competitive {
+                                ui.weak("Out/in or noncompetitive — available for inspection");
+                            }
+                            if let Some(run) = self.prepared.runs.iter().find(|run| {
+                                run.key.recording_id == recording_id
+                                    && run.key.segment_id == segment.id
+                            }) {
+                                if run.progress.is_empty() {
+                                    ui.weak("No GPS course match — use elapsed time or traveled distance.");
+                                } else {
+                                    let valid = run
+                                        .progress
+                                        .iter()
+                                        .filter(|point| point.confidence > 0.0)
+                                        .count();
+                                    ui.weak(format!(
+                                        "Course match: {:.0}% of GPS samples",
+                                        valid as f64 / run.progress.len() as f64 * 100.0
+                                    ))
+                                    .on_hover_text("Matching coverage, not statistical accuracy. Use actual GPS view to inspect the route; anchors can help ambiguous sections.");
+                                }
+                                if self.prepared.automatic_time_alignment {
+                                    if self.workspace.reference.as_ref() == Some(&run.key) {
+                                        ui.weak("Time alignment: reference clock");
+                                    } else if let Some(alignment) = &run.time_alignment {
+                                        let details = match (
+                                            alignment.distance_offset_meters,
+                                            alignment.coefficient,
+                                        ) {
+                                            (Some(distance), Some(coefficient)) => format!(
+                                                "distance shift {distance:+.1}m · start shift {:+.2}s · r {coefficient:+.3}",
+                                                alignment.offset_seconds
+                                            ),
+                                            _ => format!(
+                                                "start shift {:+.2}s",
+                                                alignment.offset_seconds
+                                            ),
+                                        };
+                                        ui.weak(format!(
+                                            "Time alignment: {} · {details}",
+                                            alignment.channel
+                                        ))
+                                        .on_hover_text("Best-effort comparison shift only; source and video timestamps were not changed.");
+                                    } else if run.distance.len() >= 2 {
+                                        ui.colored_label(
+                                            egui::Color32::LIGHT_RED,
+                                            "Time alignment unavailable — use traveled distance",
+                                        );
+                                    } else {
+                                        ui.colored_label(
+                                            egui::Color32::LIGHT_RED,
+                                            "Time alignment unavailable — using segment-relative time",
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
-                    if recording.segments.is_empty(){ui.weak(if self.loading.contains_key(&recording.primary_source){"Importing…"}else{"No interval. Check source errors or add a range in setup."});}
+                    if recording.segments.is_empty() {
+                        ui.weak(if self.loading.contains_key(&recording.primary_source) {
+                            "Importing…"
+                        } else {
+                            "No interval. Check source errors or add a range in setup."
+                        });
+                    }
                     ui.separator();
                 });
             }
@@ -292,6 +501,7 @@ impl AnalysisApp {
             self.actions.push(AnalysisAction::OpenOverlay(project));
         }
     }
+
     pub(super) fn remove_dialog(&mut self, ctx: &egui::Context) {
         if let Some(id) = self.remove_recording {
             egui::Window::new("Remove recording?").collapsible(false).show(ctx,|ui|{
@@ -307,6 +517,7 @@ impl AnalysisApp {
         let mut removed_sources = vec![];
         let mut extra = None;
         let mut restore_intervals = false;
+        let mut intervals_replaced = false;
         egui::ScrollArea::vertical().show(ui,|ui|{
             ui.label("Intervals use the recording clock, not raw camera time. Video viewers show exported-video time separately.");
             for recording in &mut self.workspace.recordings {
@@ -317,11 +528,11 @@ impl AnalysisApp {
                         let id=ui.id().with("event-pair");let mut pair=ui.data_mut(|d|d.get_temp::<[f64;2]>(id).unwrap_or([0.0,0.0]));
                         ui.add(egui::DragValue::new(&mut pair[0]).speed(0.01).prefix("Video s "));ui.add(egui::DragValue::new(&mut pair[1]).speed(0.01).prefix("Recording s "));
                         if ui.button("Apply matching event").clicked(){recording.video_offset_seconds=pair[0]-pair[1];changed=true;}ui.data_mut(|d|d.insert_temp(id,pair));
-                        ui.small("For automatic audio / sensor correlation and camera calibration, use Edit overlay / sync. Those settings return here when you switch back.");
+                        ui.small("Use the recording's Video alignment section for normal synchronization and camera orientation. Additional timing diagnostics remain available in Overlay.");
                     });
                     egui::ComboBox::from_id_salt("primary-source").selected_text(recording.sources.iter().find(|s|s.id==recording.primary_source).map_or("Primary data",|s|s.name.as_str())).show_ui(ui,|ui|{for source in &recording.sources{changed|=ui.selectable_value(&mut recording.primary_source,source.id,&source.name).changed();}});
                     if ui.button("Detect intervals from primary data").on_hover_text("Replaces this recording's intervals with logger laps or automatic motion detection.").clicked() && let Some(data)=self.data.get(&recording.primary_source) {
-                        let gps=gps_points(&data.raw,recording);let detected=auto_segments(&data.raw,recording,&gps);replace_segments_preserving_identity(recording,detected);changed=true;self.auto_select_pending=true;
+                        let gps=gps_points(&data.raw,recording);let detected=auto_segments(&data.raw,recording,&gps);replace_segments_preserving_identity(recording,detected);changed=true;intervals_replaced=true;
                     }
                     for source in &mut recording.sources {ui.push_id(source.id.0,|ui|{
                         ui.label(&source.name);ui.small(source.path.display().to_string());
@@ -381,6 +592,9 @@ impl AnalysisApp {
                 ui.data_mut(|d|d.insert_temp(id,pair));let mut remove=None;for(i,a)in self.workspace.course.manual_anchors.iter().enumerate(){ui.horizontal(|ui|{ui.label(format!("{:.3}s → {:.1}m",a.recording_time,a.reference_progress));if ui.small_button("Remove").clicked(){remove=Some(i);}});}if let Some(i)=remove{self.workspace.course.manual_anchors.remove(i);changed=true;}
             });
         });
+        if intervals_replaced {
+            self.retain_valid_selection();
+        }
         if restore_intervals {
             self.restore_detected_intervals();
             changed = true;
@@ -432,10 +646,13 @@ impl AnalysisApp {
             self.changed();
         }
     }
-    fn apply_gates(&mut self) {
+    pub(super) fn apply_gates(&mut self) {
         let gates = &self.workspace.course.gates;
+        let mut matched = 0;
+        let mut unmatched = 0;
         for r in &mut self.workspace.recordings {
             let Some(data) = self.data.get(&r.primary_source) else {
+                unmatched += 1;
                 continue;
             };
             let gps = gps_points(&data.raw, r);
@@ -450,13 +667,15 @@ impl AnalysisApp {
                     .collect()
             };
             if pairs.is_empty() {
+                unmatched += 1;
                 continue;
             }
+            matched += 1;
             let segments = pairs
                 .into_iter()
                 .enumerate()
                 .map(|(i, (start, end))| RunSegment {
-                    id: r.segments.get(i).map_or_else(SegmentId::new, |s| s.id),
+                    id: SegmentId::new(),
                     name: format!("GPS run {}", i + 1),
                     start_recording_time: start,
                     end_recording_time: end,
@@ -470,12 +689,14 @@ impl AnalysisApp {
                     unknown: Default::default(),
                 })
                 .collect();
-            r.segments = segments;
+            replace_segments_preserving_identity(r, segments);
         }
-        self.default_selection();
+        self.retain_valid_selection();
         self.state.cursor = 0.0;
         self.state.range = None;
-        self.message="Applied gates where valid directed crossings were found; unmatched recordings kept their intervals.".into();
+        self.message = format!(
+            "Applied gates to {matched} recording(s); {unmatched} without valid directed crossings kept their existing intervals."
+        );
     }
     fn restore_detected_intervals(&mut self) {
         for recording in &mut self.workspace.recordings {
@@ -486,7 +707,7 @@ impl AnalysisApp {
             let detected = auto_segments(&data.raw, recording, &gps);
             replace_segments_preserving_identity(recording, detected);
         }
-        self.auto_select_pending = true;
+        self.retain_valid_selection();
         self.state.cursor = 0.0;
         self.state.range = None;
         self.message = "Restored logger-lap or automatically detected intervals; the analysis range was cleared.".into();
@@ -549,6 +770,12 @@ impl AnalysisApp {
                 self.automatic_mode = false;
                 self.data.clear();
                 self.loading.clear();
+                self.video_audio_jobs.clear();
+                self.video_audio_results.clear();
+                self.video_alignment_jobs.clear();
+                self.video_alignment_results.clear();
+                self.video_alignment_channels.clear();
+                self.vehicle_calibration_drafts.clear();
                 self.maps.clear();
                 self.errors.clear();
                 self.active_overlay = None;

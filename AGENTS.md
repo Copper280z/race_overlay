@@ -1,86 +1,73 @@
 # Race Overlay contributor guide
 
-## Project overview
+Race Overlay is a Rust desktop application for comparing racing telemetry and
+burning configurable overlays into onboard video. Analysis and Overlay are
+complementary workflows over the same recordings and project data. Camera video
+is expected to have already been stitched or reframed; this project does not
+process raw dual-lens footage.
 
-Race Overlay is a cross-platform Rust desktop editor that synchronizes racing
-telemetry with onboard video, compares laps/runs in a dockable Analysis workspace,
-and burns configurable data widgets into an exported video in Overlay mode.
-The source video is expected to have already been stitched or
-reframed by Insta360 Studio; this project does not implement raw dual-lens
-stitching.
+## Design principles
 
-The workspace is divided into:
+- **Keep domain logic below the UI.** The app coordinates workflows; telemetry,
+  timing, calibration, filtering, and project semantics belong in
+  `overlay-core`. Rendering and FFmpeg operations stay in their own crates.
+- **Use one source-agnostic telemetry model.** Importers normalize data into
+  shared channels and units. UI and widgets must not grow source-specific paths.
+- **Preserve user data.** Adding, editing, or removing one source must not disturb
+  unrelated recordings, selections, dashboards, or layouts. Preserve unknown
+  JSON fields across load/save for forward compatibility.
+- **Make time domains explicit.** UI/video time is exported-video time; source,
+  recording, and segment-relative clocks are distinct. Course position and
+  traveled distance are also distinct comparison domains. Never extrapolate
+  beyond available telemetry or video coverage.
+- **Keep processing physically meaningful.** Convert values when changing units.
+  Calibration must preserve orientation and units. Low-pass filters are optional,
+  zero-phase, non-causal, and scoped explicitly.
+- **Keep preview and export consistent.** Both must resolve the same widget,
+  appearance, timing, and unit settings. Cache prepared geometry and filtered
+  series instead of repeating full-series work per frame.
+- **Prefer explicit gaps over plausible fiction.** GPS dropouts, failed course
+  matches, missing channels, and uncertain alignment should remain visible to
+  callers and users.
 
-- `app`: the `eframe`/`egui` desktop editor and user workflows.
-- `crates/overlay-core`: telemetry models, projects, calibration, filtering,
-  correlation, and Insta360/CSV/synthetic/AiM XRK adapters.
-- `crates/overlay-render`: widget conversion and RGBA overlay rendering.
-- `crates/overlay-media`: FFmpeg discovery, preview, audio synchronization,
-  probing, and final video export.
-- `mychron_data`: local XRK recordings used while reverse-engineering and
-  manually validating the AiM importer; these are not committed by default.
-- `docs/usage.md`: the user-facing workflow and behavior reference.
+## Project organization
 
-## Product goals and required behavior
+- `app`: `eframe`/`egui` application composition and user workflows.
+  - `analysis_app.rs`: Analysis state, preparation, and shared coordination.
+  - `analysis_views.rs`, `analysis_workflow.rs`: panels and user actions.
+  - `analysis_video_alignment.rs`: camera-generic video synchronization workflow.
+  - `analysis_maps.rs`, `analysis_imagery.rs`: map interaction and registration.
+  - `race_app.rs`: thin Overlay application root.
+  - `race_app/`: Overlay controllers, lifecycle, policy, panels, preview, export,
+    and tests. Put pure decisions in `*_policy.rs`; keep I/O in the owning
+    controller/module.
+- `crates/overlay-core`: shared models and algorithms. `telemetry.rs` defines
+  channels/units, `project.rs` persisted projects, `analysis.rs` comparison
+  geometry/timing, `processing.rs` filtering, `calibration.rs` IMU calibration,
+  and `adapters.rs`/`xrk.rs` data ingestion.
+- `crates/overlay-render`: widget preparation and RGBA rendering; no UI or media
+  orchestration.
+- `crates/overlay-media`: FFmpeg discovery, probing, preview, synchronization,
+  audio, and final export.
+- `docs/usage.md`: user-visible behavior. `README.md`: installation and project
+  introduction. `scripts/` and `packaging/`: release packaging.
+- `mychron_data`: optional local recordings for manual XRK validation; never a
+  routine test dependency or committed fixture.
 
-- Analysis extends rather than replaces Overlay. Importing or editing one
-  recording must not discard other recordings, source identities, or dashboards.
-  Fast telemetry-only autocross comparison requires neither video nor a saved
-  track. Circuit laps and multiple single-run recordings are both first-class.
-- Analysis comparison clocks are segment-relative; linked videos remain on each
-  recording's own exported-video clock. Course-position matching and traveled
-  distance are distinct modes. Keep the reference pinned, expose matching gaps,
-  and do not extrapolate video or telemetry beyond available coverage.
-- Analysis panels can dock, tab, and float. Workspaces save layouts, selections,
-  gates, anchors, and imagery registration. Actual GPS maps retain geographic
-  coordinates separately from simplified reference-course geometry.
-- Normal UI time is exported-video time: `0.0 s` means the first frame of the
-  Insta360 Studio export. Raw-source timing is an explicit advanced override,
-  and time/range controls may accept negative values where relevant.
-- Sources include Insta360 INSV/LRV telemetry, AiM MyChron XRK logs, generic
-  CSV, and deterministic synthetic data. Sources can be added and removed
-  without disturbing unrelated sources or widget layout.
-- XRK parsing is reverse-engineered. Preserve unknown records safely while
-  extracting all well-supported channels, including GPS, lap boundaries, RPM,
-  EGT, water temperature, accelerometers, gyros, steering, gear, and voltages.
-- Camera calibration removes stationary gravity and supports axis flips plus
-  fine roll, pitch, and yaw trim. Derived longitudinal/lateral/vertical G must
-  remain in physically meaningful units and orientation.
-- Every low-pass filter is optional, zero-phase, and non-causal. Source-level,
-  derived-IMU, graph-preview, and per-widget filters have distinct scopes; do
-  not silently turn any of them into a causal real-time filter.
-- Non-camera source alignment can correlate any suitable channel against any
-  other source/channel. Correlation ranges are capped to feasible overlap, and
-  the UI reports the signed Pearson coefficient before applying an offset.
-- The default unit system is configurable, and compatible units can be
-  overridden per widget without merely relabeling unconverted values.
-- Widget foreground opacity and background opacity are independent settings.
-- Appearance is project-level and saved with the project. It provides Race
-  Dark, Light, Transparent, and Custom presets plus semantic accent, text,
-  panel, muted, positive, warning, and critical colors. Widgets inherit the
-  project palette by default and may opt into per-widget color overrides.
-  Corner roundness follows the same global/inherited or per-widget override
-  model.
-  Color alpha is not used as a second opacity control: RGB colors and
-  foreground/background opacity remain separate. Preview and export must use
-  the same resolved palette.
-- GPS track maps draw one representative path for multi-lap recordings rather
-  than stacking every lap. They also support point-to-point/autocross routes,
-  playhead-captured start and finish locations, manual full-lap selection,
-  current-position display, rotation, padding, and GPS dropouts.
-- Video export defaults to matching the source video. macOS-compatible HEVC
-  uses the `hvc1` tag, YUV420 output, and a fast-start MP4 index; H.264 remains
-  available as the compatibility option. Preserve source audio.
-- Preview and export should avoid repeated full-series work per frame. Prepare
-  static geometry and cache filtered series when rendering a complete export.
+Dependency direction is `app` → media/render/core and `overlay-render` →
+`overlay-core`; no library crate couples back to `app`. When a coordinator grows,
+extract a cohesive module with a narrow interface instead of creating a generic
+dumping-ground utility module.
 
-## Development practices
+## Working agreements
 
-- Keep project-file compatibility: known widget/source settings live in the
-  existing JSON fields, and unknown fields must survive a load/save round trip.
-- Use the shared telemetry model and project bindings rather than introducing
-  source-specific paths in widgets.
-- Validate changes proportionally. The normal pre-commit checks are:
+- Prefer deterministic synthetic fixtures. Tests needing local recordings,
+  network access, or FFmpeg should remain explicit and ignored by default.
+- Add regression tests near the owning module. Test pure policy independently
+  from UI rendering or external processes when possible.
+- Update `docs/usage.md` for visible behavior and `README.md` for setup or scope.
+- Do not commit `target/`, recordings, videos, exports, or local project files.
+- Before publication, run:
 
   ```sh
   cargo fmt --all --check
@@ -88,11 +75,3 @@ The workspace is divided into:
   cargo clippy --workspace --all-targets -- -D warnings
   cargo build --release -p race-overlay
   ```
-
-- Tests that require supplied recordings should remain optional/ignored.
-  Prefer deterministic synthetic fixtures for routine tests; local XRK files
-  may be used for manual real-data validation when available.
-- Do not add generated `target` contents, local `.race-overlay.json` projects,
-  XRK logs, raw camera recordings, or exported videos to Git. The root
-  `.gitignore` deliberately excludes these data and media formats.
-- Update `README.md` or `docs/usage.md` when behavior visible to users changes.

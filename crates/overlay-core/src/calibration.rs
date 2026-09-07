@@ -1,5 +1,6 @@
 //! Guided inertial calibration and derived vehicle-frame channels.
 use crate::*;
+use thiserror::Error;
 
 const G: f64 = 9.80665;
 pub type Vec3 = [f64; 3];
@@ -189,6 +190,225 @@ pub fn accelerometer_bias_for_gravity(
         measured_gravity[1] - G * sensor_to_vehicle[2][1],
         measured_gravity[2] - G * sensor_to_vehicle[2][2],
     ]
+}
+
+/// Inputs for fitting raw inertial samples to the vehicle's forward/left/up
+/// coordinate system. Times are expressed on the telemetry source clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VehicleFrameCalibrationRequest {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub auto_find_stationary: bool,
+    pub forward_hint: Vec3,
+    pub fine_roll_radians: f64,
+    pub fine_pitch_radians: f64,
+    pub fine_yaw_radians: f64,
+    pub low_pass_hz: f64,
+}
+
+impl Default for VehicleFrameCalibrationRequest {
+    fn default() -> Self {
+        Self {
+            start_time: 0.0,
+            end_time: 2.0,
+            auto_find_stationary: true,
+            forward_hint: [1.0, 0.0, 0.0],
+            fine_roll_radians: 0.0,
+            fine_pitch_radians: 0.0,
+            fine_yaw_radians: 0.0,
+            low_pass_hz: 8.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VehicleFrameCalibrationResult {
+    pub calibration: CameraCalibration,
+    pub interval_start: f64,
+    pub interval_end: f64,
+    pub used_automatic_interval: bool,
+    pub acceleration_motion_rms: f64,
+    pub gyroscope_motion_rms: f64,
+}
+
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum VehicleFrameCalibrationError {
+    #[error("calibration requires raw accelerometer X/Y/Z channels")]
+    MissingAccelerometer,
+    #[error("calibration requires raw gyroscope X/Y/Z channels")]
+    MissingGyroscope,
+    #[error("the stationary interval must contain finite, increasing times")]
+    InvalidInterval,
+    #[error("the derived-G smoothing cutoff must be finite and greater than zero")]
+    InvalidLowPass,
+    #[error("no matched IMU samples were found in the stationary interval")]
+    NoSamples,
+    #[error("the selected forward axis is vertical; choose a different sensor-forward axis")]
+    VerticalForwardAxis,
+}
+
+/// Fit a reusable calibration from raw sensor channels. This owns stationary
+/// interval selection and motion diagnostics so Analysis and Overlay apply
+/// identical calibration semantics.
+pub fn fit_vehicle_frame_calibration(
+    dataset: &TelemetryDataset,
+    request: VehicleFrameCalibrationRequest,
+) -> Result<VehicleFrameCalibrationResult, VehicleFrameCalibrationError> {
+    if !request.start_time.is_finite()
+        || !request.end_time.is_finite()
+        || request.end_time <= request.start_time
+    {
+        return Err(VehicleFrameCalibrationError::InvalidInterval);
+    }
+    if !request.low_pass_hz.is_finite() || request.low_pass_hz <= 0.0 {
+        return Err(VehicleFrameCalibrationError::InvalidLowPass);
+    }
+    let accel = named_inertial_triplet(dataset, "raw_accel_")
+        .ok_or(VehicleFrameCalibrationError::MissingAccelerometer)?;
+    let gyro = named_inertial_triplet(dataset, "raw_gyro_")
+        .ok_or(VehicleFrameCalibrationError::MissingGyroscope)?;
+    let mut start = request.start_time;
+    let mut end = request.end_time;
+    let mut accel_window = inertial_window(accel, start, end);
+    let mut gyro_window = inertial_window(gyro, start, end);
+    let selected_motion = inertial_motion_metrics(&accel_window, &gyro_window);
+    let needs_automatic_interval =
+        selected_motion.is_none_or(|(accel_rms, gyro_rms)| accel_rms > 1.0 || gyro_rms > 0.15);
+    let mut used_automatic_interval = false;
+    if request.auto_find_stationary
+        && needs_automatic_interval
+        && let Some((quiet_start, quiet_end)) =
+            quietest_inertial_interval(accel, gyro, (end - start).max(1.0))
+    {
+        start = quiet_start;
+        end = quiet_end;
+        accel_window = inertial_window(accel, start, end);
+        gyro_window = inertial_window(gyro, start, end);
+        used_automatic_interval = true;
+    }
+    let gravity = median_gravity(accel_window.iter().copied())
+        .ok_or(VehicleFrameCalibrationError::NoSamples)?;
+    let gyroscope_bias = median_gravity(gyro_window.iter().copied())
+        .ok_or(VehicleFrameCalibrationError::NoSamples)?;
+    let sensor_to_vehicle = guided_sensor_to_vehicle_from_forward_with_trim(
+        gravity,
+        request.forward_hint,
+        request.fine_roll_radians,
+        request.fine_pitch_radians,
+        request.fine_yaw_radians,
+        [false; 3],
+    )
+    .ok_or(VehicleFrameCalibrationError::VerticalForwardAxis)?;
+    let (acceleration_motion_rms, gyroscope_motion_rms) =
+        inertial_motion_metrics(&accel_window, &gyro_window)
+            .ok_or(VehicleFrameCalibrationError::NoSamples)?;
+    Ok(VehicleFrameCalibrationResult {
+        calibration: CameraCalibration {
+            sensor_to_vehicle,
+            accelerometer_bias: accelerometer_bias_for_gravity(gravity, sensor_to_vehicle),
+            gyroscope_bias,
+            low_pass_hz: request.low_pass_hz,
+            notes: None,
+        },
+        interval_start: start,
+        interval_end: end,
+        used_automatic_interval,
+        acceleration_motion_rms,
+        gyroscope_motion_rms,
+    })
+}
+
+fn named_inertial_triplet<'a>(
+    dataset: &'a TelemetryDataset,
+    prefix: &str,
+) -> Option<[&'a TelemetryChannel; 3]> {
+    Some([
+        dataset.named(&format!("{prefix}x"))?,
+        dataset.named(&format!("{prefix}y"))?,
+        dataset.named(&format!("{prefix}z"))?,
+    ])
+}
+
+fn inertial_window(channels: [&TelemetryChannel; 3], start: f64, end: f64) -> Vec<Vec3> {
+    let count = channels
+        .iter()
+        .map(|channel| channel.series.samples.len())
+        .min()
+        .unwrap_or(0);
+    (0..count)
+        .filter_map(|index| {
+            let time = channels[0].series.samples[index].time;
+            (time >= start && time <= end).then(|| {
+                [
+                    channels[0].series.samples[index].value,
+                    channels[1].series.samples[index].value,
+                    channels[2].series.samples[index].value,
+                ]
+            })
+        })
+        .collect()
+}
+
+fn inertial_motion_metrics(accel: &[Vec3], gyro: &[Vec3]) -> Option<(f64, f64)> {
+    let gravity = median_gravity(accel.iter().copied())?;
+    let gravity_magnitude = norm(gravity);
+    let accel_variance = accel
+        .iter()
+        .map(|sample| {
+            sample
+                .iter()
+                .zip(gravity)
+                .map(|(value, center)| (value - center).powi(2))
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / accel.len() as f64;
+    let accel_motion = (accel_variance + (gravity_magnitude - G).powi(2)).sqrt();
+    let gyro_motion = (gyro
+        .iter()
+        .flat_map(|sample| sample.iter())
+        .map(|value| value * value)
+        .sum::<f64>()
+        / gyro.len().max(1) as f64)
+        .sqrt();
+    Some((accel_motion, gyro_motion))
+}
+
+fn quietest_inertial_interval(
+    accel: [&TelemetryChannel; 3],
+    gyro: [&TelemetryChannel; 3],
+    duration: f64,
+) -> Option<(f64, f64)> {
+    let first = accel
+        .iter()
+        .chain(gyro.iter())
+        .filter_map(|channel| channel.series.samples.first().map(|sample| sample.time))
+        .max_by(f64::total_cmp)?;
+    let last = accel
+        .iter()
+        .chain(gyro.iter())
+        .filter_map(|channel| channel.series.samples.last().map(|sample| sample.time))
+        .min_by(f64::total_cmp)?;
+    let duration = duration.clamp(1.0, (last - first).max(1.0));
+    let step = (duration * 0.5).max(0.5);
+    let mut candidate = first;
+    let mut best: Option<(f64, f64)> = None;
+    while candidate + duration <= last + f64::EPSILON {
+        let accel_window = inertial_window(accel, candidate, candidate + duration);
+        let gyro_window = inertial_window(gyro, candidate, candidate + duration);
+        if accel_window.len() >= 20
+            && gyro_window.len() >= 20
+            && let Some((accel_motion, gyro_motion)) =
+                inertial_motion_metrics(&accel_window, &gyro_window)
+        {
+            let score = accel_motion + gyro_motion / 0.15;
+            if best.is_none_or(|(_, best_score)| score < best_score) {
+                best = Some((candidate, score));
+            }
+        }
+        candidate += step;
+    }
+    best.map(|(start, _)| (start, start + duration))
 }
 
 /// A forward/backward first-order low-pass. Applying it in both directions
@@ -490,6 +710,66 @@ mod tests {
         assert!(corrected[0].abs() < 1e-12);
         assert!(corrected[1].abs() < 1e-12);
         assert!((corrected[2] - G).abs() < 1e-12);
+    }
+    #[test]
+    fn vehicle_frame_fit_finds_quiet_data_and_enables_derived_lateral_g() {
+        let raw = |name: &str, values: &dyn Fn(f64) -> f64| TelemetryChannel {
+            descriptor: ChannelDescriptor {
+                id: ChannelId::new(),
+                name: name.into(),
+                quantity: Quantity::Generic,
+                unit: Unit::Unitless,
+                interpolation: Interpolation::Linear,
+                description: None,
+            },
+            series: ChannelSeries::new(
+                (0..=60)
+                    .map(|index| {
+                        let time = f64::from(index) * 0.1;
+                        TimedSample {
+                            time,
+                            value: values(time),
+                        }
+                    })
+                    .collect(),
+            ),
+        };
+        let mut dataset = TelemetryDataset::default();
+        for channel in [
+            raw("raw_accel_x", &|time| {
+                if time < 3.0 {
+                    (time * 15.0).sin() * 2.0
+                } else {
+                    0.0
+                }
+            }),
+            raw("raw_accel_y", &|_| 0.0),
+            raw("raw_accel_z", &|_| G),
+            raw("raw_gyro_x", &|time| if time < 3.0 { 0.5 } else { 0.0 }),
+            raw("raw_gyro_y", &|_| 0.0),
+            raw("raw_gyro_z", &|_| 0.0),
+        ] {
+            dataset.insert(channel);
+        }
+
+        let result = fit_vehicle_frame_calibration(
+            &dataset,
+            VehicleFrameCalibrationRequest {
+                start_time: 0.0,
+                end_time: 2.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.used_automatic_interval);
+        assert!(result.interval_start >= 3.0, "{result:?}");
+        assert!(add_derived_inertial_channels(
+            &mut dataset,
+            &result.calibration,
+            1_000.0
+        ));
+        assert!(dataset.named("lateral_g").is_some());
     }
     #[test]
     fn filter_keeps_constant() {
