@@ -1,3 +1,4 @@
+use super::sync::resolved_video_alignment_offsets;
 use super::workflow::replace_segments_preserving_identity;
 use super::*;
 
@@ -250,7 +251,6 @@ fn regular_plot_delta_uses_and_rebases_gate_defined_runs() {
     let run = |key: SegmentRef, name: &str, start: f64, end: f64, times| PreparedRun {
         key,
         name: name.into(),
-        color: COLORS[0],
         start,
         end,
         gps: vec![],
@@ -277,29 +277,6 @@ fn regular_plot_delta_uses_and_rebases_gate_defined_runs() {
     assert_eq!(traces.len(), 2);
     assert_eq!(traces[1].points[0][0], [0.0, 0.0]);
     assert!((traces[1].points[0][2][1] - 0.8).abs() < 1e-9);
-}
-
-#[test]
-fn delta_gate_window_uses_directed_start_and_finish_crossings() {
-    let points = [-0.001, 0.001, 0.0015, 0.0025]
-        .into_iter()
-        .enumerate()
-        .map(|(index, latitude)| GpsPoint {
-            recording_time: index as f64,
-            latitude,
-            longitude: 0.0,
-            accuracy_meters: None,
-        })
-        .collect::<Vec<_>>();
-    let gate = |latitude| Gate {
-        latitude,
-        longitude: 0.0,
-        heading_degrees: 0.0,
-        width_meters: 20.0,
-    };
-    let window = gate_window(&points, &[gate(0.0), gate(0.002)], 0.0, 3.0).unwrap();
-    assert!((window.0 - 0.5).abs() < 1e-9);
-    assert!((window.1 - 2.5).abs() < 1e-9);
 }
 
 #[test]
@@ -342,7 +319,6 @@ fn scatter_aligns_xy_and_optional_z_on_recording_time() {
     app.prepared.runs = vec![PreparedRun {
         key,
         name: "run".into(),
-        color: COLORS[0],
         start: 0.0,
         end: 2.0,
         gps: vec![],
@@ -432,7 +408,6 @@ fn gate_capture_uses_pinned_reference_even_when_prepared_runs_are_stale() {
     app.prepared.runs = vec![PreparedRun {
         key: first_key,
         name: "stale first run".into(),
-        color: COLORS[0],
         start: 0.0,
         end: 2.0,
         gps: vec![],
@@ -629,7 +604,6 @@ fn time_plot_interpolates_an_exact_gate_boundary_sample() {
     app.prepared.runs = vec![PreparedRun {
         key,
         name: "gated".into(),
-        color: COLORS[0],
         start: 0.5,
         end: 1.5,
         gps: vec![],
@@ -714,29 +688,6 @@ fn prepared_axes_start_at_interpolated_gate_boundaries() {
 }
 
 #[test]
-fn gate_boundary_interpolation_does_not_bridge_a_gps_outage() {
-    let points = [0.0, 1.0, 4.0]
-        .into_iter()
-        .map(|recording_time| GpsPoint {
-            recording_time,
-            latitude: recording_time,
-            longitude: recording_time,
-            accuracy_meters: None,
-        })
-        .collect::<Vec<_>>();
-
-    let clipped = gps_inside_interval(&points, 0.5, 2.0);
-
-    assert_eq!(clipped.first().unwrap().recording_time, 0.5);
-    assert_eq!(clipped.last().unwrap().recording_time, 1.0);
-    assert!(
-        clipped
-            .iter()
-            .all(|point| (point.recording_time - 2.0).abs() > 1e-9)
-    );
-}
-
-#[test]
 fn stopped_reference_video_keeps_its_actual_elapsed_clock() {
     let mut app = AnalysisApp::new();
     let (r, key) = recording("reference", source("source", SourceId::new()), "lap");
@@ -753,7 +704,6 @@ fn stopped_reference_video_keeps_its_actual_elapsed_clock() {
     app.prepared.runs = vec![PreparedRun {
         key,
         name: "stopped".into(),
-        color: COLORS[0],
         start: 0.0,
         end: 2.0,
         gps: vec![],

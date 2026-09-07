@@ -33,7 +33,9 @@ process raw dual-lens footage.
 ## Project organization
 
 - `app`: `eframe`/`egui` application composition and user workflows.
-  - `analysis_app.rs`: Analysis state, preparation, and shared coordination.
+  - `analysis_app.rs`: Analysis composition, navigation, and shared view queries.
+  - `analysis_model.rs`: serializable tabs/options and view-runtime models.
+  - `analysis_io.rs`: imports, background work, and media attachment coordination.
   - `analysis_views.rs`, `analysis_workflow.rs`: plots, setup, and workspace actions.
   - `analysis_recordings.rs`: recording rows and the actions they emit.
   - `analysis_sync/`: recording-scoped audio sync, camera calibration,
@@ -44,9 +46,10 @@ process raw dual-lens footage.
     and tests. Put pure decisions in `*_policy.rs`; keep I/O in the owning
     controller/module.
 - `crates/overlay-core`: shared models and algorithms. `telemetry.rs` defines
-  channels/units, `project.rs` persisted projects, `analysis.rs` comparison
-  geometry/timing, `processing.rs` filtering, `calibration.rs` IMU calibration,
-  and `adapters.rs`/`xrk.rs` data ingestion.
+  channels/units, `project.rs` persisted projects, `analysis.rs` workspace and
+  course geometry, `comparison/` preparation and alignment strategies,
+  `processing.rs` filtering, `calibration.rs` IMU calibration, and
+  `adapters.rs`/`xrk.rs` data ingestion.
 - `crates/overlay-render`: widget preparation and RGBA rendering; no UI or media
   orchestration.
 - `crates/overlay-media`: FFmpeg discovery, probing, preview, synchronization,

@@ -89,7 +89,17 @@ impl AnalysisApp {
             .runs
             .iter()
             .filter(|run| self.state.selection.contains(&run.key))
-            .map(|run| (segment_key(&run.key), run.name.clone(), run.color))
+            .map(|run| {
+                (
+                    segment_key(&run.key),
+                    run.name.clone(),
+                    run_color(
+                        &self.state.selection,
+                        self.workspace.reference.as_ref(),
+                        &run.key,
+                    ),
+                )
+            })
             .collect::<Vec<_>>();
         ui.collapsing("Plot controls", |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -532,7 +542,11 @@ impl AnalysisApp {
             result.push(PlotTrace {
                 segment: run.key.clone(),
                 name: run.name.clone(),
-                color: run.color,
+                color: run_color(
+                    &self.state.selection,
+                    self.workspace.reference.as_ref(),
+                    &run.key,
+                ),
                 points: pieces,
                 unit,
             });
@@ -558,7 +572,17 @@ impl AnalysisApp {
             .runs
             .iter()
             .filter(|run| self.state.selection.contains(&run.key))
-            .map(|run| (segment_key(&run.key), run.name.clone(), run.color))
+            .map(|run| {
+                (
+                    segment_key(&run.key),
+                    run.name.clone(),
+                    run_color(
+                        &self.state.selection,
+                        self.workspace.reference.as_ref(),
+                        &run.key,
+                    ),
+                )
+            })
             .collect::<Vec<_>>();
         ui.collapsing("Scatter controls", |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -795,7 +819,11 @@ impl AnalysisApp {
                 (!points.is_empty()).then(|| ScatterTrace {
                     segment: run.key.clone(),
                     name: run.name.clone(),
-                    color: run.color,
+                    color: run_color(
+                        &self.state.selection,
+                        self.workspace.reference.as_ref(),
+                        &run.key,
+                    ),
                     points,
                 })
             })
@@ -1144,7 +1172,11 @@ impl AnalysisApp {
                 traces.push(MapTrace {
                     segment: run.key.clone(),
                     name: run.name.clone(),
-                    color: run.color,
+                    color: run_color(
+                        &self.state.selection,
+                        self.workspace.reference.as_ref(),
+                        &run.key,
+                    ),
                     gps: run.gps.clone(),
                     progress: run.progress.clone(),
                     values,
@@ -1213,7 +1245,14 @@ impl AnalysisApp {
                 if !self.state.selection.contains(&run.key) {
                     continue;
                 }
-                ui.colored_label(run.color, &run.name);
+                ui.colored_label(
+                    run_color(
+                        &self.state.selection,
+                        self.workspace.reference.as_ref(),
+                        &run.key,
+                    ),
+                    &run.name,
+                );
                 let range = self
                     .state
                     .range
