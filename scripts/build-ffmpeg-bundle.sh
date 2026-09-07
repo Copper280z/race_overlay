@@ -108,11 +108,13 @@ case "$host" in
             cmake --build "$x265_source/build-race-overlay"
             cmake --install "$x265_source/build-race-overlay"
         fi
+        PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export PKG_CONFIG_PATH
         configure_platform="--enable-gpl --enable-libx264 --enable-libx265 --pkg-config-flags=--static --extra-cflags=-I$prefix/include --extra-ldflags=-L$prefix/lib --extra-ldflags=-static-libgcc --extra-ldflags=-static-libstdc++"
         ;;
     MINGW*|MSYS*)
         tool_suffix=.exe
-        configure_platform="--disable-gpl --arch=x86_64 --target-os=mingw32 --enable-mediafoundation --extra-ldflags=-static-libgcc"
+        configure_platform="--disable-gpl --arch=x86_64 --target-os=mingw32 --enable-d3d11va --enable-mediafoundation --extra-ldflags=-static-libgcc"
         ;;
     *)
         echo "unsupported FFmpeg build host: $host" >&2
