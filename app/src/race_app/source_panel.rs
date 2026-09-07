@@ -4,7 +4,7 @@ use super::super::policy::{
 };
 use super::{OverlayEditor, PanelAction};
 use eframe::egui;
-use overlay_core::{ChannelRef, SourceId};
+use overlay_core::{ChannelRef, SourceId, builtin_adapter_capabilities};
 
 impl OverlayEditor {
     pub(in crate::race_app) fn sources_panel(&mut self, ui: &mut egui::Ui) {
@@ -116,7 +116,8 @@ impl OverlayEditor {
                         },
                     );
                 }
-                if source.adapter == "insta360"
+                let capabilities = builtin_adapter_capabilities(&source.adapter);
+                if capabilities.embedded_audio_sync
                     && ui
                         .add_enabled(!syncing, egui::Button::new("Re-sync from audio"))
                         .clicked()
@@ -151,7 +152,7 @@ impl OverlayEditor {
                     source_low_pass_settings(&source.settings);
                 let mut low_pass_changed = false;
                 ui.collapsing("Source low-pass (all imported continuous channels)", |ui| {
-                    if source.adapter == "insta360" {
+                    if capabilities.camera_telemetry {
                         ui.small("Zero-phase, non-causal smoothing before camera-derived signals are calculated. Discrete channels are unchanged.");
                     } else {
                         ui.small("Zero-phase, non-causal smoothing for every imported continuous channel. Discrete channels such as gear are unchanged.");
@@ -182,12 +183,12 @@ impl OverlayEditor {
                 if ui.button("Reload & apply source smoothing").clicked() {
                     self.apply_source_low_pass(source.id);
                 }
-                if source.adapter != "insta360" {
+                if !capabilities.camera_telemetry {
                     self.correlation_ui(ui, source.id);
                 }
             }
             if let Some(source) = sources.iter().find(|item| item.id == source_id)
-                && source.adapter == "insta360"
+                && builtin_adapter_capabilities(&source.adapter).vehicle_frame_calibration
             {
                 ui.collapsing("Camera calibration", |ui| {
                 ui.label("Choose a stationary interval. Then select the camera sensor axis that points toward the kart nose; gravity determines up.");

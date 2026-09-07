@@ -4,7 +4,7 @@ use super::super::{PREVIEW_H, PREVIEW_W};
 use super::OverlayEditor;
 use super::WorkerEvent;
 use eframe::egui;
-use overlay_core::SourceId;
+use overlay_core::{SourceId, builtin_adapter_capabilities};
 use overlay_media::{PreviewSize, VideoMetadata};
 use overlay_render::{
     AlignedDatasets, RenderOptions, RenderSize, render_project_widgets_with_appearance,
@@ -133,7 +133,11 @@ impl OverlayEditor {
                         project
                             .sources
                             .iter()
-                            .find(|source| source.id == id && source.adapter == "insta360")
+                            .find(|source| {
+                                source.id == id
+                                    && builtin_adapter_capabilities(&source.adapter)
+                                        .vehicle_frame_calibration
+                            })
                             .and_then(|_| {
                                 project
                                     .camera_calibration
@@ -195,7 +199,7 @@ impl OverlayEditor {
                     let should_auto_sync = self.project().is_some_and(|project| {
                         project.sources.iter().any(|source| {
                             source.id == id
-                                && source.adapter == "insta360"
+                                && builtin_adapter_capabilities(&source.adapter).embedded_audio_sync
                                 && source.alignment.offset_seconds.abs() < 1e-9
                         })
                     }) && self

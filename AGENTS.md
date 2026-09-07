@@ -34,8 +34,10 @@ process raw dual-lens footage.
 
 - `app`: `eframe`/`egui` application composition and user workflows.
   - `analysis_app.rs`: Analysis state, preparation, and shared coordination.
-  - `analysis_views.rs`, `analysis_workflow.rs`: panels and user actions.
-  - `analysis_video_alignment.rs`: camera-generic video synchronization workflow.
+  - `analysis_views.rs`, `analysis_workflow.rs`: plots, setup, and workspace actions.
+  - `analysis_recordings.rs`: recording rows and the actions they emit.
+  - `analysis_sync/`: recording-scoped audio sync, camera calibration,
+    logger/camera correlation, persistence compatibility, and presentation.
   - `analysis_maps.rs`, `analysis_imagery.rs`: map interaction and registration.
   - `race_app.rs`: thin Overlay application root.
   - `race_app/`: Overlay controllers, lifecycle, policy, panels, preview, export,

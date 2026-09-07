@@ -23,8 +23,42 @@ pub enum AdapterError {
     Config(String),
 }
 
+/// Product-facing features supplied by a telemetry adapter.
+///
+/// Workflows should ask for these capabilities instead of branching on an
+/// adapter id. That keeps UI behavior independent from a particular camera or
+/// logger brand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdapterCapabilities {
+    /// The source is telemetry recorded alongside camera media.
+    pub camera_telemetry: bool,
+    /// The source can be aligned to its companion video through embedded audio.
+    pub embedded_audio_sync: bool,
+    /// Raw inertial channels can be calibrated into vehicle coordinates.
+    pub vehicle_frame_calibration: bool,
+}
+
+impl AdapterCapabilities {
+    const CAMERA_TELEMETRY: Self = Self {
+        camera_telemetry: true,
+        embedded_audio_sync: true,
+        vehicle_frame_calibration: true,
+    };
+}
+
+/// Capabilities for a built-in adapter id stored in a project file.
+pub fn builtin_adapter_capabilities(id: &str) -> AdapterCapabilities {
+    match id {
+        "insta360" => AdapterCapabilities::CAMERA_TELEMETRY,
+        _ => AdapterCapabilities::default(),
+    }
+}
+
 pub trait TelemetrySourceAdapter: Send + Sync {
     fn id(&self) -> &'static str;
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::default()
+    }
     fn load(
         &self,
         source_id: SourceId,
@@ -51,6 +85,9 @@ impl AdapterRegistry {
     }
     pub fn get(&self, id: &str) -> Option<&Arc<dyn TelemetrySourceAdapter>> {
         self.adapters.get(id)
+    }
+    pub fn capabilities(&self, id: &str) -> Option<AdapterCapabilities> {
+        self.get(id).map(|adapter| adapter.capabilities())
     }
     pub fn load(
         &self,
@@ -672,6 +709,9 @@ impl TelemetrySourceAdapter for Insta360Adapter {
     fn id(&self) -> &'static str {
         "insta360"
     }
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::CAMERA_TELEMETRY
+    }
     fn load(
         &self,
         source_id: SourceId,
@@ -855,6 +895,21 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn camera_workflow_uses_declared_adapter_capabilities() {
+        let registry = AdapterRegistry::with_builtins();
+        let camera = registry.capabilities("insta360").unwrap();
+        assert_eq!(camera, builtin_adapter_capabilities("insta360"));
+        assert!(camera.camera_telemetry);
+        assert!(camera.embedded_audio_sync);
+        assert!(camera.vehicle_frame_calibration);
+        assert_eq!(
+            registry.capabilities("generic_csv"),
+            Some(AdapterCapabilities::default())
+        );
+    }
+
     #[test]
     fn csv_source_filter_settings_do_not_disable_default_time_and_headers() {
         let mut f = NamedTempFile::new().unwrap();

@@ -12,11 +12,14 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+#[path = "analysis_recordings.rs"]
+mod recordings;
+#[path = "analysis_sync/mod.rs"]
+mod sync;
 #[cfg(test)]
 #[path = "analysis_tests.rs"]
 mod tests;
-#[path = "analysis_video_alignment.rs"]
-mod video_alignment;
+use sync::{CameraVideoSyncMetadata, VideoAlignmentCandidate, VideoSyncController};
 #[path = "analysis_views.rs"]
 mod views;
 #[path = "analysis_workflow.rs"]
@@ -33,10 +36,6 @@ const COLORS: [egui::Color32; 8] = [
 ];
 const DELTA_CHANNEL: &str = "delta_time";
 const DELTA_LABEL: &str = "Time delta — positive is slower";
-const VIDEO_AUDIO_OFFSET_KEY: &str = "analysis_video_audio_offset_seconds";
-const VIDEO_AUDIO_PEAK_KEY: &str = "analysis_video_audio_peak";
-const VIDEO_AUDIO_CONFIDENCE_KEY: &str = "analysis_video_audio_confidence";
-const VIDEO_ALIGNMENT_APPLIED_KEY: &str = "analysis_video_alignment_applied";
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize, Debug)]
 enum XMode {
     Time,
@@ -217,52 +216,6 @@ struct Prepared {
     course: Option<ReferenceCourse>,
     automatic_time_alignment: bool,
 }
-#[derive(Clone, Debug)]
-struct VideoAlignmentCandidate {
-    recording_id: RecordingId,
-    target_source: SourceId,
-    camera_source: SourceId,
-    target_channel: ChannelRef,
-    camera_channel: ChannelRef,
-    camera_video_offset_seconds: f64,
-    result: CorrelationResult,
-}
-#[derive(Clone)]
-struct VehicleCalibrationDraft {
-    start: f64,
-    end: f64,
-    source_time: bool,
-    auto_stationary: bool,
-    forward_axis: usize,
-    roll_degrees: f64,
-    pitch_degrees: f64,
-    yaw_degrees: f64,
-    low_pass_hz: f64,
-}
-impl Default for VehicleCalibrationDraft {
-    fn default() -> Self {
-        Self {
-            start: 0.0,
-            end: 2.0,
-            source_time: false,
-            auto_stationary: true,
-            forward_axis: 0,
-            roll_degrees: 0.0,
-            pitch_degrees: 0.0,
-            yaw_degrees: 0.0,
-            low_pass_hz: 8.0,
-        }
-    }
-}
-fn resolved_video_alignment_offsets(
-    target_recording_offset: f64,
-    target_minus_camera_seconds: f64,
-    camera_minus_video_seconds: f64,
-) -> (f64, f64) {
-    let camera_recording_offset = target_recording_offset - target_minus_camera_seconds;
-    let video_recording_offset = camera_recording_offset - camera_minus_video_seconds;
-    (camera_recording_offset, video_recording_offset)
-}
 fn automatic_alignment_complete(prepared: &Prepared, reference: Option<&SegmentRef>) -> bool {
     let candidates = prepared
         .runs
@@ -335,12 +288,7 @@ pub struct AnalysisApp {
     visible_videos: HashSet<u64>,
     metadata: HashMap<PathBuf, Result<VideoMetadata, String>>,
     probing: HashSet<PathBuf>,
-    video_audio_jobs: HashMap<SourceId, u64>,
-    video_audio_results: HashMap<SourceId, Result<AlignmentResult, String>>,
-    video_alignment_jobs: HashMap<RecordingId, u64>,
-    video_alignment_results: HashMap<RecordingId, Result<VideoAlignmentCandidate, String>>,
-    video_alignment_channels: HashMap<RecordingId, (ChannelRef, ChannelRef)>,
-    vehicle_calibration_drafts: HashMap<SourceId, VehicleCalibrationDraft>,
+    video_sync: VideoSyncController,
     playing: bool,
     last_frame: Instant,
     active_overlay: Option<RecordingId>,
@@ -384,12 +332,7 @@ impl AnalysisApp {
             visible_videos: HashSet::new(),
             metadata: HashMap::new(),
             probing: HashSet::new(),
-            video_audio_jobs: HashMap::new(),
-            video_audio_results: HashMap::new(),
-            video_alignment_jobs: HashMap::new(),
-            video_alignment_results: HashMap::new(),
-            video_alignment_channels: HashMap::new(),
-            vehicle_calibration_drafts: HashMap::new(),
+            video_sync: VideoSyncController::default(),
             playing: false,
             last_frame: Instant::now(),
             active_overlay: None,
@@ -609,8 +552,7 @@ impl AnalysisApp {
             .map(|recording| recording.id)
             .collect::<Vec<_>>()
         {
-            self.video_alignment_jobs.remove(&recording_id);
-            self.video_alignment_results.remove(&recording_id);
+            self.video_sync.invalidate_estimate(recording_id);
         }
         self.load_serial = self.load_serial.wrapping_add(1);
         let serial = self.load_serial;
@@ -741,22 +683,15 @@ impl AnalysisApp {
                     .filter(|source| is_camera_telemetry_source(source))
                 {
                     camera_sources.push(source.id);
-                    if let Some(settings) = source.settings.as_object_mut() {
-                        settings.remove(VIDEO_AUDIO_OFFSET_KEY);
-                        settings.remove(VIDEO_AUDIO_PEAK_KEY);
-                        settings.remove(VIDEO_AUDIO_CONFIDENCE_KEY);
-                        settings.remove(VIDEO_ALIGNMENT_APPLIED_KEY);
-                    }
+                    CameraVideoSyncMetadata::clear(&mut source.settings);
                 }
             }
             r.video_path = Some(path);
         }
         for source_id in camera_sources {
-            self.video_audio_jobs.remove(&source_id);
-            self.video_audio_results.remove(&source_id);
+            self.video_sync.invalidate_audio(id, source_id);
         }
-        self.video_alignment_jobs.remove(&id);
-        self.video_alignment_results.remove(&id);
+        self.video_sync.invalidate_estimate(id);
         self.changed();
     }
     fn poll(&mut self, ctx: &egui::Context) {
@@ -827,89 +762,10 @@ impl AnalysisApp {
                     self.metadata.insert(path, result);
                 }
                 Event::VideoAudioAligned(serial, recording_id, source_id, result) => {
-                    if self.video_audio_jobs.get(&source_id) != Some(&serial) {
-                        continue;
-                    }
-                    self.video_audio_jobs.remove(&source_id);
-                    if !self.workspace.recordings.iter().any(|recording| {
-                        recording.id == recording_id
-                            && recording
-                                .sources
-                                .iter()
-                                .any(|source| source.id == source_id)
-                    }) {
-                        continue;
-                    }
-                    self.video_audio_results.insert(source_id, result.clone());
-                    match result {
-                        Ok(alignment) => {
-                            let camera_video_offset = -alignment.offset_seconds;
-                            if let Some(recording) = self
-                                .workspace
-                                .recordings
-                                .iter_mut()
-                                .find(|recording| recording.id == recording_id)
-                                && let Some(source) = recording
-                                    .sources
-                                    .iter_mut()
-                                    .find(|source| source.id == source_id)
-                            {
-                                if !source.settings.is_object() {
-                                    source.settings = json!({});
-                                }
-                                source.settings[VIDEO_AUDIO_OFFSET_KEY] =
-                                    json!(camera_video_offset);
-                                source.settings[VIDEO_AUDIO_PEAK_KEY] =
-                                    json!(alignment.normalized_peak);
-                                source.settings[VIDEO_AUDIO_CONFIDENCE_KEY] =
-                                    json!(alignment.confidence.min(999.0));
-                                if recording.primary_source == source_id {
-                                    recording.video_offset_seconds =
-                                        source.alignment.offset_seconds - camera_video_offset;
-                                    source.settings[VIDEO_ALIGNMENT_APPLIED_KEY] =
-                                        json!(alignment.auto_acceptable());
-                                }
-                            }
-                            self.message = format!(
-                                "Camera audio aligned to the exported video (peak {:.2}, confidence {:.2}){}",
-                                alignment.normalized_peak,
-                                alignment.confidence,
-                                if alignment.auto_acceptable() {
-                                    ""
-                                } else {
-                                    "; inspect before applying telemetry correlation"
-                                }
-                            );
-                            self.changed();
-                        }
-                        Err(error) => {
-                            self.message = format!("Camera/video audio alignment failed: {error}");
-                        }
-                    }
+                    self.handle_video_audio_aligned(serial, recording_id, source_id, result);
                 }
                 Event::VideoAlignmentEstimated(serial, recording_id, result) => {
-                    if self.video_alignment_jobs.get(&recording_id) != Some(&serial) {
-                        continue;
-                    }
-                    self.video_alignment_jobs.remove(&recording_id);
-                    if !self
-                        .workspace
-                        .recordings
-                        .iter()
-                        .any(|recording| recording.id == recording_id)
-                    {
-                        continue;
-                    }
-                    self.video_alignment_results
-                        .insert(recording_id, result.clone());
-                    self.message = match result {
-                        Ok(candidate) => format!(
-                            "Video alignment estimate: {:+.3}s logger-minus-camera lag, Pearson r {:+.3}; review and apply it in Recordings & laps.",
-                            candidate.result.target_minus_reference_seconds,
-                            candidate.result.correlation_coefficient
-                        ),
-                        Err(error) => format!("Video alignment estimate failed: {error}"),
-                    };
+                    self.handle_video_alignment_estimated(serial, recording_id, result);
                 }
             }
         }
@@ -1353,9 +1209,7 @@ fn is_video(path: &Path) -> bool {
     )
 }
 fn is_camera_telemetry_source(source: &SourceConfig) -> bool {
-    // Keep the workflow camera-generic; supported adapters opt into this role
-    // here as they are added.
-    matches!(source.adapter.as_str(), "insta360")
+    builtin_adapter_capabilities(&source.adapter).camera_telemetry
 }
 fn display_unit(unit: Unit, quantity: Quantity, system: UnitSystem) -> Unit {
     system
