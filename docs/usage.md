@@ -383,10 +383,10 @@ For a terminal summary of one or more logs:
 cargo run -p overlay-core --example xrk_inspect -- path/to/session.xrk
 ```
 
-XRK is a reverse-engineered format. The importer validates message framing and
-retains diagnostic counts for packets emitted by the logger without a matching
-channel definition. These hidden/internal packets are not presented as named
-telemetry because the file supplies neither their labels nor calibration.
+The XRK importer validates message framing and retains diagnostic counts for
+packets emitted by the logger without a matching channel definition. These
+hidden/internal packets are not presented as named telemetry because the file
+supplies neither their labels nor calibration.
 
 ## Project files
 

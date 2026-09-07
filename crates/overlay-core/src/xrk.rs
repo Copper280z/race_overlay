@@ -1,8 +1,7 @@
-//! Decoder for the AiM XRK packets observed in MyChron recordings.
+//! Decoder for AiM XRK recordings.
 //!
-//! XRK is not publicly specified by AiM.  This module deliberately keeps the
-//! wire parser separate from the app adapter and reports packet families it
-//! cannot associate with a configured channel.
+//! This module keeps file parsing separate from the app adapter and reports
+//! packet families it cannot associate with a configured channel.
 
 use std::collections::{BTreeMap, HashMap};
 
