@@ -209,7 +209,9 @@ controls, and use **Fit** to reset.
 For a continental-US course, use the imagery panel's USGS download action to
 save an aerial image, geographic bounds, and attribution in a local assets
 folder. An internet connection is required only for the download; saved images
-work offline. Existing map images can be imported as PNG/JPEG and registered
+work offline. Before a workspace is saved, downloads use Race Overlay's writable
+per-user application-data folder; saved workspaces use an adjacent `.assets`
+folder. Existing map images can be imported as PNG/JPEG and registered
 using geographic bounds or three non-collinear image/GPS control points. Bounds
 use a north-up Web Mercator image; control points support rotated images.
 Geographic registration is independent of the simplified course map. Downloads

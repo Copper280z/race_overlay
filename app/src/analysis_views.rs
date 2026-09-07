@@ -1202,7 +1202,7 @@ impl AnalysisApp {
             .path
             .as_ref()
             .map(|p| p.with_extension("assets"))
-            .unwrap_or_else(|| PathBuf::from("analysis.race-analysis.assets"));
+            .unwrap_or_else(crate::app_paths::unsaved_analysis_imagery_dir);
         let unit = target_unit;
         let label = format!("{} ({})", channel, unit.as_ref().map_or("", Unit::symbol));
         let selected = panel.ui(
