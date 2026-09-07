@@ -15,10 +15,11 @@ when one is available. A release labeled as including FFmpeg contains everything
 needed for video preview, synchronization, and export; extract it and run Race
 Overlay. It does not need Rust, Homebrew, or a separate FFmpeg installation.
 
-Race Overlay is not currently code-signed. macOS may require you to Control-click
-the app, choose **Open**, and confirm once. Windows may show a SmartScreen notice
-for an unfamiliar application. Only run packages downloaded from this project's
-release page.
+Race Overlay does not yet have Apple Developer ID signing or notarization. The
+macOS app is ad-hoc signed to protect its bundle integrity, but its first launch
+still requires you to Control-click **Race Overlay**, choose **Open**, then
+confirm **Open** once. Windows may show a SmartScreen notice for an unfamiliar
+application. Only run packages downloaded from this project's release page.
 
 ### Building from source
 
@@ -212,6 +213,12 @@ users do not need to install FFmpeg. Prepare the licensed bundle described in
 The scripts reject a bundled FFmpeg directory that lacks its license, build
 information, or corresponding-source location. Without the environment variable,
 they produce an unbundled package that uses an installed FFmpeg copy.
+
+The macOS script signs nested tools and seals the completed app bundle. It uses
+an ad-hoc identity by default; release maintainers with a Developer ID
+certificate can set `RACE_OVERLAY_MACOS_SIGN_IDENTITY` to that certificate's
+full identity. Apple notarization is still required for ordinary double-click
+launches without the first-run Control-click confirmation.
 
 GitHub Actions runs these packaging scripts on native macOS, Windows, and Linux
 runners. A manual **Build release packages** run stores all three packages as

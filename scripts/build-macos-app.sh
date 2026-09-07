@@ -39,6 +39,26 @@ else
 fi
 touch "$app_bundle"
 
+sign_identity=${RACE_OVERLAY_MACOS_SIGN_IDENTITY:--}
+sign_path() {
+    if [ "$sign_identity" = - ]; then
+        codesign --force --sign - --timestamp=none "$1"
+    else
+        codesign --force --sign "$sign_identity" --options runtime --timestamp "$1"
+    fi
+}
+
+# Rust and FFmpeg binaries carry linker-generated ad-hoc signatures. Sign every
+# nested executable again, then seal the completed bundle so Gatekeeper does not
+# interpret its added Resources as post-signing damage.
+if [ -d "$resources/third-party/ffmpeg/bin" ]; then
+    sign_path "$resources/third-party/ffmpeg/bin/ffmpeg"
+    sign_path "$resources/third-party/ffmpeg/bin/ffprobe"
+fi
+sign_path "$macos/race-overlay"
+sign_path "$app_bundle"
+codesign --verify --deep --strict --verbose=2 "$app_bundle"
+
 archive="$target_dir/release/race-overlay-macos-$(uname -m).zip"
 rm -f "$archive"
 ditto -c -k --sequesterRsrc --keepParent "$app_bundle" "$archive"
