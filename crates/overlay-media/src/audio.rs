@@ -39,8 +39,8 @@ pub fn extract_mono_pcm_with_tools(
         return Err(MediaError::Process(message.into_owned()));
     }
     let mut pcm = Vec::with_capacity(out.stdout.len() / 4);
-    for bytes in out.stdout.chunks_exact(4) {
-        pcm.push(f32::from_le_bytes(bytes.try_into().unwrap()));
+    for bytes in out.stdout.as_chunks::<4>().0 {
+        pcm.push(f32::from_le_bytes(*bytes));
     }
     Ok(pcm)
 }

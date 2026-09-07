@@ -2844,7 +2844,7 @@ fn draw_text(pm: &mut Pixmap, x: f32, y: f32, s: &str, color: Rgba, size: f32) {
 }
 fn rgba_image(pm: &Pixmap) -> RgbaImage {
     let mut pixels = Vec::with_capacity((pm.width() * pm.height() * 4) as usize);
-    for p in pm.data().chunks_exact(4) {
+    for p in pm.data().as_chunks::<4>().0 {
         let a = p[3];
         if a == 0 {
             pixels.extend_from_slice(&[0, 0, 0, 0])
@@ -3253,7 +3253,9 @@ mod tests {
         let left: Vec<u8> = output
             .image
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(i, _)| i % 200 < 100)
             .flat_map(|(_, pixel)| pixel.iter().copied())
@@ -3261,7 +3263,9 @@ mod tests {
         let right: Vec<u8> = output
             .image
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(i, _)| i % 200 >= 100)
             .flat_map(|(_, pixel)| pixel.iter().copied())

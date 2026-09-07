@@ -452,8 +452,9 @@ pub struct GenericCsvAdapter;
 impl GenericCsvAdapter {
     fn delimiter(text: &str) -> u8 {
         let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        [b',', b';', b'\t']
-            .into_iter()
+        b",;\t"
+            .iter()
+            .copied()
             .max_by_key(|d| line.as_bytes().iter().filter(|c| **c == *d).count())
             .unwrap_or(b',')
     }
