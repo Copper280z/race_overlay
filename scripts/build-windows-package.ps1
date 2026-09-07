@@ -49,10 +49,10 @@ if ($env:RACE_OVERLAY_FFMPEG_BUNDLE) {
         throw "FFmpeg bundle must include its corresponding source in source/"
     }
     $BuildInfo = Get-Content (Join-Path $BundleDir "BUILD_INFO.txt") -Raw
-    if (-not $BuildInfo.Contains("--disable-gpl") -or
-        -not $BuildInfo.Contains("--disable-nonfree") -or
-        $BuildInfo -match "--enable-(gpl|nonfree)") {
-        throw "FFmpeg bundle must explicitly disable GPL and nonfree components"
+    if (-not $BuildInfo.Contains("--disable-nonfree") -or
+        ($BuildInfo -notmatch "--(enable|disable)-gpl") -or
+        $BuildInfo.Contains("--enable-nonfree")) {
+        throw "FFmpeg bundle must explicitly record GPL status and disable nonfree components"
     }
     New-Item -ItemType Directory -Force -Path $FfmpegDir | Out-Null
     Copy-Item (Join-Path $BundleDir "*") $FfmpegDir -Recurse -Force

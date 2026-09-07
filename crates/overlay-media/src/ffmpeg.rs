@@ -94,22 +94,29 @@ fn bundled_candidates(executable: &Path, name: &str) -> Vec<PathBuf> {
     #[cfg(not(windows))]
     let tool_name = name.to_owned();
 
-    let mut candidates = vec![
+    let candidates = vec![
         executable_dir.join(&tool_name),
         executable_dir
             .join("third-party/ffmpeg/bin")
             .join(&tool_name),
     ];
     #[cfg(target_os = "macos")]
-    if let Some(contents) = executable_dir.parent() {
-        candidates.extend([
-            contents.join("Resources").join(&tool_name),
-            contents
-                .join("Resources/third-party/ffmpeg/bin")
-                .join(&tool_name),
-        ]);
+    {
+        let mut candidates = candidates;
+        if let Some(contents) = executable_dir.parent() {
+            candidates.extend([
+                contents.join("Resources").join(&tool_name),
+                contents
+                    .join("Resources/third-party/ffmpeg/bin")
+                    .join(&tool_name),
+            ]);
+        }
+        candidates
     }
-    candidates
+    #[cfg(not(target_os = "macos"))]
+    {
+        candidates
+    }
 }
 
 fn validate_configured(
@@ -230,6 +237,7 @@ impl EncoderCapabilities {
                 "h264_videotoolbox",
                 "h264_nvenc",
                 "h264_qsv",
+                "h264_mf",
                 "h264_vaapi",
                 "h264_amf",
                 "libopenh264",
@@ -239,6 +247,7 @@ impl EncoderCapabilities {
                 "hevc_videotoolbox",
                 "hevc_nvenc",
                 "hevc_qsv",
+                "hevc_mf",
                 "hevc_vaapi",
                 "hevc_amf",
                 "libx265",
@@ -328,6 +337,10 @@ mod tests {
 
         let c = EncoderCapabilities::new(["libopenh264"]);
         assert_eq!(c.select(Encoder::H264).as_deref(), Some("libopenh264"));
+
+        let c = EncoderCapabilities::new(["h264_mf", "hevc_mf"]);
+        assert_eq!(c.select(Encoder::H264).as_deref(), Some("h264_mf"));
+        assert_eq!(c.select(Encoder::H265).as_deref(), Some("hevc_mf"));
     }
 
     #[test]

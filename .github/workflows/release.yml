@@ -44,22 +44,16 @@ jobs:
             command: ./scripts/build-linux-package.sh
             artifact_name: race-overlay-linux-x86_64
             artifact_path: target/release/race-overlay-linux-x86_64.tar.gz
-            ffmpeg_url_var: FFMPEG_BUNDLE_LINUX_X64_URL
-            ffmpeg_sha_var: FFMPEG_BUNDLE_LINUX_X64_SHA256
           - name: macOS Apple silicon
             os: macos-15
             command: ./scripts/build-macos-app.sh
             artifact_name: race-overlay-macos-arm64
             artifact_path: target/release/race-overlay-macos-arm64.zip
-            ffmpeg_url_var: FFMPEG_BUNDLE_MACOS_ARM64_URL
-            ffmpeg_sha_var: FFMPEG_BUNDLE_MACOS_ARM64_SHA256
           - name: Windows x64
             os: windows-2022
             command: pwsh -File ./scripts/build-windows-package.ps1
             artifact_name: race-overlay-windows-amd64
             artifact_path: target/release/race-overlay-windows-amd64.zip
-            ffmpeg_url_var: FFMPEG_BUNDLE_WINDOWS_X64_URL
-            ffmpeg_sha_var: FFMPEG_BUNDLE_WINDOWS_X64_SHA256
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out source
@@ -73,26 +67,31 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
-      - name: Download reviewed FFmpeg bundle
-        if: ${{ vars[matrix.ffmpeg_url_var] != '' }}
-        shell: pwsh
-        env:
-          BUNDLE_URL: ${{ vars[matrix.ffmpeg_url_var] }}
-          BUNDLE_SHA256: ${{ vars[matrix.ffmpeg_sha_var] }}
+          sudo apt-get install --yes build-essential cmake ninja-build nasm libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
+      - name: Set up Windows FFmpeg toolchain
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-nasm
+            mingw-w64-x86_64-yasm
+      - name: Build bundled FFmpeg
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:BUNDLE_SHA256)) {
-            throw "An FFmpeg bundle URL requires its matching SHA-256 repository variable"
-          }
-          $Archive = Join-Path $env:RUNNER_TEMP "ffmpeg-bundle.zip"
-          $BundleDir = Join-Path $env:RUNNER_TEMP "ffmpeg-bundle"
-          Invoke-WebRequest -Uri $env:BUNDLE_URL -OutFile $Archive
-          $ActualHash = (Get-FileHash -Algorithm SHA256 $Archive).Hash
-          if ($ActualHash -ne $env:BUNDLE_SHA256) {
-            throw "FFmpeg bundle SHA-256 mismatch: expected $env:BUNDLE_SHA256, got $ActualHash"
-          }
-          Expand-Archive -Path $Archive -DestinationPath $BundleDir
-          "RACE_OVERLAY_FFMPEG_BUNDLE=$BundleDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          ./scripts/build-ffmpeg-bundle.sh ffmpeg-bundle
+          echo "RACE_OVERLAY_FFMPEG_BUNDLE=$GITHUB_WORKSPACE/ffmpeg-bundle" >> "$GITHUB_ENV"
+      - name: Build bundled FFmpeg on Windows
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          RACE_OVERLAY_FFMPEG_BUILD_DIR=ffmpeg-build ./scripts/build-ffmpeg-bundle.sh ffmpeg-bundle
+          echo "RACE_OVERLAY_FFMPEG_BUNDLE=$GITHUB_WORKSPACE/ffmpeg-bundle" >> "$GITHUB_ENV"
       - name: Build package
         shell: bash
         run: ${{ matrix.command }}
@@ -127,6 +126,13 @@ jobs:
           sha256sum race-overlay-* > SHA256SUMS.txt
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" ./* --clobber
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              gh release edit "$RELEASE_TAG" --prerelease
+            fi
           else
-            gh release create "$RELEASE_TAG" ./* --verify-tag --generate-notes --title "Race Overlay $RELEASE_TAG"
+            prerelease=
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              prerelease=--prerelease
+            fi
+            gh release create "$RELEASE_TAG" ./* --verify-tag --generate-notes --title "Race Overlay $RELEASE_TAG" $prerelease
           fi

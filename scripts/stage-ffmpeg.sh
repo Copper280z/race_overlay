@@ -30,13 +30,16 @@ if [ ! -d "$bundle_dir/source" ] ||
     echo "FFmpeg bundle must include its corresponding source in source/" >&2
     exit 1
 fi
-if ! grep -q -- '--disable-gpl' "$bundle_dir/BUILD_INFO.txt" ||
-    ! grep -q -- '--disable-nonfree' "$bundle_dir/BUILD_INFO.txt"; then
-    echo "FFmpeg bundle must explicitly disable GPL and nonfree components" >&2
+if ! grep -q -- '--disable-nonfree' "$bundle_dir/BUILD_INFO.txt"; then
+    echo "FFmpeg bundle must explicitly disable nonfree components" >&2
     exit 1
 fi
-if grep -Eq -- '--enable-(gpl|nonfree)' "$bundle_dir/BUILD_INFO.txt"; then
-    echo "FFmpeg bundle enables GPL or nonfree components and cannot be packaged" >&2
+if ! grep -Eq -- '--(enable|disable)-gpl' "$bundle_dir/BUILD_INFO.txt"; then
+    echo "FFmpeg bundle must explicitly record whether GPL components are enabled" >&2
+    exit 1
+fi
+if grep -q -- '--enable-nonfree' "$bundle_dir/BUILD_INFO.txt"; then
+    echo "FFmpeg bundle enables nonfree components and cannot be packaged" >&2
     exit 1
 fi
 

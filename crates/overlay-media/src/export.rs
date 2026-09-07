@@ -234,6 +234,12 @@ pub fn build_export_command(
     {
         args.extend(["-preset".into(), preset.clone()]);
     }
+    if encoder.ends_with("_videotoolbox") {
+        // VideoToolbox can reject otherwise valid dimensions or be unavailable
+        // when its hardware session is busy. Let macOS fall back to its
+        // software implementation instead of failing the entire export.
+        args.extend(["-allow_sw".into(), "1".into()]);
+    }
     if settings.apple_compatible
         && let Some(tag) = apple_codec_tag(encoder)
     {
@@ -622,6 +628,7 @@ mod tests {
             "hevc_videotoolbox",
         );
         assert!(command.args.windows(2).any(|w| w == ["-tag:v", "hvc1"]));
+        assert!(command.args.windows(2).any(|w| w == ["-allow_sw", "1"]));
         assert!(
             command
                 .args

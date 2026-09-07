@@ -17,16 +17,19 @@ ffmpeg-bundle/
 ```
 
 The tools must be portable to the target machines; copying a dynamically linked
-package-manager installation is generally not sufficient. Race Overlay's
-release policy uses an LGPL-only FFmpeg configuration. `BUILD_INFO.txt` records
-the complete `ffmpeg -version` output and how the tools were built, including
-explicit `--disable-gpl` and `--disable-nonfree` flags. `LICENSE.txt` contains
-the LGPL text that applies to that exact build.
+package-manager installation is generally not sufficient. `BUILD_INFO.txt`
+records the complete `ffmpeg -version` output and how the tools were built,
+including an explicit `--disable-nonfree` flag. `LICENSE.txt` contains the LGPL
+or GPL text that applies to that exact build.
 `SOURCE.txt` inventories the complete corresponding source and build materials
 included in `source/`. Do not package an FFmpeg build configured with
 `--enable-nonfree`.
 
-The packaging scripts reject incomplete bundle metadata, `--enable-gpl`, and
-`--enable-nonfree`, then place the entire directory under
-`third-party/ffmpeg`. Race Overlay checks that location before checking the
-user's `PATH`.
+The packaging scripts reject incomplete bundle metadata and
+`--enable-nonfree`, then place the entire directory under `third-party/ffmpeg`.
+Race Overlay checks that location before checking the user's `PATH`.
+
+The release workflow creates these inputs with
+`scripts/build-ffmpeg-bundle.sh`: LGPL-only VideoToolbox and MediaFoundation
+builds on macOS and Windows, and a GPL build with statically linked x264/x265 on
+Linux. All are built from the source archives copied into `source/`.

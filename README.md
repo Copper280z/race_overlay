@@ -216,28 +216,19 @@ they produce an unbundled package that uses an installed FFmpeg copy.
 GitHub Actions runs these packaging scripts on native macOS, Windows, and Linux
 runners. A manual **Build release packages** run stores all three packages as
 workflow artifacts. Pushing a tag such as `v0.1.0` also creates a GitHub Release
-and attaches them with a SHA-256 checksum file. The automated packages use an
-installed FFmpeg unless a reviewed portable bundle is deliberately supplied;
-runner-installed tools are not copied into a release because they may be
-dynamically linked or carry different license terms.
+and attaches them with a SHA-256 checksum file. Prerelease tags such as
+`v0.1.0-alpha.1` are marked as prereleases.
 
-To bundle FFmpeg in automated releases, upload each reviewed bundle as a ZIP at
-a stable public URL, then set its URL and SHA-256 digest under **Repository
-Settings → Secrets and variables → Actions → Variables**:
-
-| Package | URL variable | Checksum variable |
-| --- | --- | --- |
-| Linux x64 | `FFMPEG_BUNDLE_LINUX_X64_URL` | `FFMPEG_BUNDLE_LINUX_X64_SHA256` |
-| macOS arm64 | `FFMPEG_BUNDLE_MACOS_ARM64_URL` | `FFMPEG_BUNDLE_MACOS_ARM64_SHA256` |
-| Windows x64 | `FFMPEG_BUNDLE_WINDOWS_X64_URL` | `FFMPEG_BUNDLE_WINDOWS_X64_SHA256` |
-
-Each ZIP must contain the bundle files directly, not inside an extra top-level
-folder. The workflow verifies the download checksum, and the platform packaging
-script then verifies its licensing metadata before including it.
+Each native job builds FFmpeg from checksum-pinned upstream source before
+building Race Overlay. macOS uses VideoToolbox, Windows uses MediaFoundation,
+and Linux statically includes x264/x265 software encoders. Required filters and
+encoders are verified before packaging. The complete source archives, license
+texts, and actual FFmpeg build configuration are included in every package.
 
 ## License
 
 Race Overlay is available under the [MIT License](LICENSE). FFmpeg is a separate
-component under its own license. Official Race Overlay packages use an
-LGPL-2.1-or-later FFmpeg configuration; a separately installed system FFmpeg
-may use GPL components. See [third-party notices](THIRD_PARTY_NOTICES.md).
+component under its own license. The macOS and Windows bundles use an
+LGPL-2.1-or-later FFmpeg configuration. The FFmpeg executable in the Linux
+bundle enables x264 and x265 and is therefore distributed under
+GPL-2.0-or-later. See [third-party notices](THIRD_PARTY_NOTICES.md).
