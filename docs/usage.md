@@ -2,6 +2,9 @@
 
 ## Requirements
 
+For beginner-oriented installation and FFmpeg troubleshooting, see
+[Install and run](../README.md#install-and-run) in the README.
+
 - Rust 1.95 or newer (required by the current GUI dependencies)
 - FFmpeg and FFprobe for video preview, synchronization, and export;
   telemetry-only analysis works without them. Race Overlay checks `PATH` and,

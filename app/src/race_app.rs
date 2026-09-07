@@ -95,6 +95,22 @@ impl RaceOverlayApp {
                     self.editor.set_unit_system(unit_system);
                 }
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("About", |ui| {
+                    ui.heading("Race Overlay");
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.hyperlink_to(
+                        "Project website",
+                        "https://github.com/Copper280z/race_overlay",
+                    );
+                    ui.separator();
+                    ui.small("Race Overlay is licensed under the MIT License.");
+                    ui.small(
+                        "Video features use the separate FFmpeg and FFprobe programs under their applicable LGPL/GPL terms.",
+                    );
+                    ui.hyperlink_to("FFmpeg licensing", "https://ffmpeg.org/legal.html");
+                });
+            });
         });
     }
 }

@@ -49,6 +49,13 @@ pub enum ToolError {
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {
+    if let Ok(executable) = env::current_exe()
+        && let Some(candidate) = bundled_candidates(&executable, name)
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+    {
+        return Some(candidate);
+    }
     if let Some(path) = env::var_os("PATH") {
         for dir in env::split_paths(&path) {
             let candidate = dir.join(name);
@@ -74,18 +81,35 @@ fn find_program(name: &str) -> Option<PathBuf> {
                 return Some(candidate);
             }
         }
-        // Also support a future self-contained distribution which places the
-        // tools in Race Overlay.app/Contents/Resources.
-        if let Ok(executable) = env::current_exe()
-            && let Some(contents) = executable.parent().and_then(Path::parent)
-        {
-            let candidate = contents.join("Resources").join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
     }
     None
+}
+
+fn bundled_candidates(executable: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(executable_dir) = executable.parent() else {
+        return vec![];
+    };
+    #[cfg(windows)]
+    let tool_name = format!("{name}.exe");
+    #[cfg(not(windows))]
+    let tool_name = name.to_owned();
+
+    let mut candidates = vec![
+        executable_dir.join(&tool_name),
+        executable_dir
+            .join("third-party/ffmpeg/bin")
+            .join(&tool_name),
+    ];
+    #[cfg(target_os = "macos")]
+    if let Some(contents) = executable_dir.parent() {
+        candidates.extend([
+            contents.join("Resources").join(&tool_name),
+            contents
+                .join("Resources/third-party/ffmpeg/bin")
+                .join(&tool_name),
+        ]);
+    }
+    candidates
 }
 
 fn validate_configured(
@@ -208,6 +232,7 @@ impl EncoderCapabilities {
                 "h264_qsv",
                 "h264_vaapi",
                 "h264_amf",
+                "libopenh264",
                 "libx264",
             ],
             Encoder::H265 => &[
@@ -300,5 +325,32 @@ mod tests {
         let c = EncoderCapabilities::new(["libx264", "h264_nvenc", "libx265"]);
         assert_eq!(c.select(Encoder::H264).as_deref(), Some("h264_nvenc"));
         assert_eq!(c.select(Encoder::H265).as_deref(), Some("libx265"));
+
+        let c = EncoderCapabilities::new(["libopenh264"]);
+        assert_eq!(c.select(Encoder::H264).as_deref(), Some("libopenh264"));
+    }
+
+    #[test]
+    fn packaged_tools_are_discovered_beside_the_application() {
+        let executable = Path::new("/opt/race-overlay/race-overlay");
+        let candidates = bundled_candidates(executable, "ffmpeg");
+        #[cfg(windows)]
+        let expected = Path::new("/opt/race-overlay/third-party/ffmpeg/bin/ffmpeg.exe");
+        #[cfg(not(windows))]
+        let expected = Path::new("/opt/race-overlay/third-party/ffmpeg/bin/ffmpeg");
+        assert!(candidates.iter().any(|candidate| candidate == expected));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn packaged_tools_are_discovered_in_a_macos_bundle() {
+        let executable = Path::new("/Applications/Race Overlay.app/Contents/MacOS/race-overlay");
+        let candidates = bundled_candidates(executable, "ffprobe");
+        assert!(candidates.iter().any(|candidate| {
+            candidate
+                == Path::new(
+                    "/Applications/Race Overlay.app/Contents/Resources/third-party/ffmpeg/bin/ffprobe",
+                )
+        }));
     }
 }
