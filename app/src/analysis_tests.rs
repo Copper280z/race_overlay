@@ -688,6 +688,89 @@ fn prepared_axes_start_at_interpolated_gate_boundaries() {
 }
 
 #[test]
+fn complete_lap_matching_disambiguates_the_shared_start_finish_boundary() {
+    let source_id = SourceId::new();
+    let (mut recording, lap_six) = recording("track", source("logger", source_id), "Lap 6");
+    recording.segments[0].end_recording_time = 4.0;
+    let lap_seven_segment = RunSegment {
+        id: SegmentId::new(),
+        name: "Lap 7".into(),
+        start_recording_time: 4.0,
+        end_recording_time: 8.0,
+        kind: SegmentKind::Lap,
+        estimated: false,
+        competitive: true,
+        unknown: Default::default(),
+    };
+    let lap_seven = SegmentRef {
+        recording_id: recording.id,
+        segment_id: lap_seven_segment.id,
+    };
+    recording.segments.push(lap_seven_segment);
+
+    // The two laps share one GPS sample at the timing boundary. Its location is
+    // an exact match for the end of the reference course but is also close to
+    // its start, reproducing the ambiguity of a closed circuit.
+    let latitudes = [
+        42.0, 42.0, 42.0002, 42.0002, 42.00001, 42.0, 42.0002, 42.0002, 42.00001,
+    ];
+    let longitudes = [
+        -77.0, -76.9998, -76.9998, -77.0002, -76.99999, -76.9998, -76.9998, -77.0002, -76.99999,
+    ];
+    let position_channel = |name: &str, values: [f64; 9]| TelemetryChannel {
+        descriptor: ChannelDescriptor {
+            id: ChannelId::new(),
+            name: name.into(),
+            quantity: Quantity::Position,
+            unit: Unit::Degree,
+            interpolation: Interpolation::Linear,
+            description: None,
+        },
+        series: ChannelSeries::new(
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| TimedSample {
+                    time: index as f64,
+                    value,
+                })
+                .collect(),
+        ),
+    };
+    let mut dataset = TelemetryDataset {
+        source_id,
+        ..Default::default()
+    };
+    dataset.insert(position_channel("gps_latitude", latitudes));
+    dataset.insert(position_channel("gps_longitude", longitudes));
+    let workspace = AnalysisWorkspace {
+        recordings: vec![recording],
+        reference: Some(lap_six.clone()),
+        ..Default::default()
+    };
+    let prepared = prepare_comparison(
+        &workspace,
+        &[lap_six, lap_seven.clone()],
+        &HashMap::from([(source_id, SourceData::from_dataset(Arc::new(dataset)))]),
+    );
+    let course_length = prepared.course.as_ref().unwrap().length_meters();
+    let candidate = prepared
+        .runs
+        .iter()
+        .find(|run| run.key == lap_seven)
+        .unwrap();
+
+    assert!(
+        candidate
+            .progress
+            .iter()
+            .all(|sample| sample.confidence > 0.0)
+    );
+    assert!(candidate.progress.first().unwrap().progress < 2.0);
+    assert!(candidate.progress.last().unwrap().progress > course_length - 2.0);
+}
+
+#[test]
 fn stopped_reference_video_keeps_its_actual_elapsed_clock() {
     let mut app = AnalysisApp::new();
     let (r, key) = recording("reference", source("source", SourceId::new()), "lap");
@@ -1110,6 +1193,61 @@ fn supplied_xrk_recordings_import_when_available() {
         "real XRK import / matching / UI completed in {:?}",
         start.elapsed()
     );
+}
+
+#[test]
+#[ignore = "requires the supplied local GVKC XRK recording"]
+fn supplied_gvkc_lap_seven_matches_lap_six_course_position() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mychron_data/gvkc/a_0065.xrk");
+    assert!(path.exists(), "supplied GVKC fixture is required");
+    let mut app = AnalysisApp::new();
+    let ctx = egui::Context::default();
+    app.add_paths(vec![path]);
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    while !app.loading.is_empty() || app.preparing || app.prepared_revision != app.revision {
+        app.poll(&ctx);
+        assert!(Instant::now() < deadline, "{:?}", app.errors);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(app.errors.is_empty(), "{:?}", app.errors);
+    let recording = &app.workspace.recordings[0];
+    let key_for = |name: &str| {
+        let segment = recording
+            .segments
+            .iter()
+            .find(|segment| segment.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        SegmentRef {
+            recording_id: recording.id,
+            segment_id: segment.id,
+        }
+    };
+    let lap_six = key_for("Lap 6");
+    let lap_seven = key_for("Lap 7");
+    app.workspace.reference = Some(lap_six.clone());
+    app.state.selection = vec![lap_six, lap_seven.clone()];
+    app.changed();
+    while app.preparing || app.prepared_revision != app.revision {
+        app.poll(&ctx);
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let candidate = app
+        .prepared
+        .runs
+        .iter()
+        .find(|run| run.key == lap_seven)
+        .unwrap();
+    let valid_samples = candidate
+        .progress
+        .iter()
+        .filter(|sample| sample.confidence > 0.0)
+        .count();
+    let course_length = app.prepared.course.as_ref().unwrap().length_meters();
+    assert!(candidate.progress.len() > 800);
+    assert_eq!(valid_samples, candidate.progress.len());
+    assert!(candidate.progress.first().unwrap().progress < 1.0);
+    assert!(candidate.progress.last().unwrap().progress > course_length - 1.0);
 }
 
 #[test]

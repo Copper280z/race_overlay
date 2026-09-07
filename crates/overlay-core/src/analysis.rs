@@ -1043,7 +1043,7 @@ fn interpolate_progress(s: &[ProgressSample], x: f64, by_time: bool) -> Option<f
     }
     Some(value(left) + (value(right) - value(left)) * (x - axis(left)) / width)
 }
-fn haversine(a: &GpsPoint, b: &GpsPoint) -> f64 {
+pub(crate) fn haversine(a: &GpsPoint, b: &GpsPoint) -> f64 {
     let r = 6_371_000.;
     let dlat = (b.latitude - a.latitude).to_radians();
     let dlon = (b.longitude - a.longitude).to_radians();

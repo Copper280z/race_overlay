@@ -120,17 +120,6 @@ pub fn prepare_comparison(
                     },
                 })
                 .collect();
-            let anchors = workspace
-                .course
-                .manual_anchors
-                .iter()
-                .filter(|a| a.segment.as_ref() == Some(key))
-                .cloned()
-                .map(|mut a| {
-                    a.segment = None;
-                    a
-                })
-                .collect::<Vec<_>>();
             let progress = course
                 .as_ref()
                 .map(|c| {
@@ -151,6 +140,7 @@ pub fn prepare_comparison(
                             })
                             .collect()
                     } else {
+                        let anchors = course_matching_anchors(workspace, key, s, &gps, c);
                         match_reference_course(c, &gps, &anchors)
                     }
                 })
@@ -183,4 +173,49 @@ pub fn prepare_comparison(
         course,
         automatic_time_alignment,
     }
+}
+
+fn course_matching_anchors(
+    workspace: &AnalysisWorkspace,
+    key: &SegmentRef,
+    segment: &RunSegment,
+    gps: &[GpsPoint],
+    course: &ReferenceCourse,
+) -> Vec<ManualAnchor> {
+    let mut anchors = workspace
+        .course
+        .manual_anchors
+        .iter()
+        .filter(|anchor| anchor.segment.as_ref() == Some(key))
+        .cloned()
+        .map(|mut anchor| {
+            anchor.segment = None;
+            anchor
+        })
+        .collect::<Vec<_>>();
+
+    // A complete lap begins at the timing boundary, which is also the end of a
+    // closed reference course. Seed that otherwise ambiguous first projection
+    // at course zero, but only when the geometry confirms the closed boundary.
+    let begins_at_closed_boundary = gps
+        .first()
+        .zip(course.points.first())
+        .zip(course.points.last())
+        .is_some_and(|((start, course_start), course_end)| {
+            crate::analysis::haversine(start, course_start) <= 35.0
+                && crate::analysis::haversine(start, course_end) <= 35.0
+        });
+    let has_manual_start = anchors.iter().any(|anchor| {
+        anchor.reference_progress.is_finite()
+            && (anchor.recording_time - segment.start_recording_time).abs() <= 0.15
+    });
+    if segment.kind == SegmentKind::Lap && begins_at_closed_boundary && !has_manual_start {
+        anchors.push(ManualAnchor {
+            segment: None,
+            recording_time: segment.start_recording_time,
+            reference_progress: 0.0,
+            unknown: Default::default(),
+        });
+    }
+    anchors
 }
