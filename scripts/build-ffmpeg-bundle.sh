@@ -31,6 +31,10 @@ x265_sha256=a31699c6a89806b74b0151e5e6a7df65de4b49050482fe5ebf8a4379d7af8f29
 x265_url="https://bitbucket.org/multicoreware/x265_git/downloads/x265_$x265_version.tar.gz"
 
 build_root=${RACE_OVERLAY_FFMPEG_BUILD_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/race-overlay-ffmpeg-build}
+case "$build_root" in
+    /*) ;;
+    *) build_root="$(pwd)/$build_root" ;;
+esac
 downloads="$build_root/downloads"
 sources="$build_root/sources"
 prefix="$build_root/prefix"
