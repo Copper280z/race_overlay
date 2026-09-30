@@ -29,6 +29,11 @@ impl OverlayEditor {
 
     pub(super) fn request_preview(&mut self) {
         if let Some(preview) = &self.preview_controller.preview
+            && let Some(config) = self.project().and_then(|p| p.video_processing.as_ref())
+        {
+            preview.set_config(config);
+        }
+        if let Some(preview) = &self.preview_controller.preview
             && let Err(e) = preview.request(
                 self.session.current_time().max(0.0),
                 PreviewSize::new(PREVIEW_W, PREVIEW_H),
@@ -39,6 +44,7 @@ impl OverlayEditor {
     }
 
     pub(super) fn start_playback(&mut self) {
+        self.request_preview();
         let fps = self
             .session
             .metadata()
@@ -197,11 +203,13 @@ impl OverlayEditor {
                     self.auto_bind_unbound_widgets();
                     self.refresh_overlay();
                     let should_auto_sync = self.project().is_some_and(|project| {
-                        project.sources.iter().any(|source| {
-                            source.id == id
-                                && builtin_adapter_capabilities(&source.adapter).embedded_audio_sync
-                                && source.alignment.offset_seconds.abs() < 1e-9
-                        })
+                        project.video_processing.is_none()
+                            && project.sources.iter().any(|source| {
+                                source.id == id
+                                    && builtin_adapter_capabilities(&source.adapter)
+                                        .embedded_audio_sync
+                                    && source.alignment.offset_seconds.abs() < 1e-9
+                            })
                     }) && self
                         .session
                         .datasets()
@@ -365,7 +373,16 @@ impl OverlayEditor {
                             ));
                         }
                     }
-                    Err(e) => self.status = e.to_string(),
+                    Err(e) => {
+                        self.status = e.to_string();
+                        if self
+                            .session
+                            .project()
+                            .is_some_and(|p| p.v1().video_processing.is_some())
+                        {
+                            self.preview_controller.video_texture = None;
+                        }
+                    }
                 }
             }
         }

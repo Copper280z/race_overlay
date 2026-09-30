@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 pub mod bitmap_font;
+pub mod video;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PixelRect {

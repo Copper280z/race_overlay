@@ -256,7 +256,7 @@ impl AnalysisApp {
         match action {
             RecordingAction::AttachVideo(id) => {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Exported video", &["mp4", "mov", "mkv"])
+                    .add_filter("Video", &["mp4", "mov", "mkv", "insv"])
                     .pick_file()
                 {
                     self.attach_video(id, path);

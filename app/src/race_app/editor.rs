@@ -155,7 +155,13 @@ impl OverlayEditor {
     }
 
     pub(super) fn playback_finished(&self) -> bool {
-        self.preview_controller.playing && self.session.current_time() >= self.duration()
+        self.preview_controller.playing
+            && (self.session.current_time() >= self.duration()
+                || self
+                    .preview_controller
+                    .preview
+                    .as_ref()
+                    .is_some_and(|p| p.playback_finished()))
     }
 
     pub(super) fn plot_visible(&self) -> bool {

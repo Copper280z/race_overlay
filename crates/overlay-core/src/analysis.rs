@@ -62,6 +62,8 @@ pub struct Recording {
     pub primary_source: SourceId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_processing: Option<crate::VideoProcessingConfig>,
     #[serde(default)]
     pub video_offset_seconds: f64,
     #[serde(default)]
@@ -362,6 +364,7 @@ pub fn recording_from_project(
         sources,
         primary_source,
         video_path: Some(project.video_path.clone()),
+        video_processing: project.video_processing.clone(),
         video_offset_seconds,
         segments: vec![],
         overlay_snapshot: Some(project),
@@ -375,6 +378,7 @@ pub fn project_from_recording(recording: &Recording) -> ProjectV1 {
         .clone()
         .unwrap_or_else(|| ProjectV1::new(recording.video_path.clone().unwrap_or_default()));
     p.video_path = recording.video_path.clone().unwrap_or(p.video_path);
+    p.video_processing = recording.video_processing.clone();
     p.sources = recording.sources.clone();
     for s in &mut p.sources {
         s.alignment.offset_seconds -= recording.video_offset_seconds;
@@ -1067,6 +1071,7 @@ mod tests {
         let id = SourceId::new();
         let p = ProjectV1 {
             video_path: "x.mp4".into(),
+            video_processing: None,
             appearance: Value::Null,
             sources: vec![SourceConfig {
                 id,
@@ -1371,6 +1376,7 @@ mod tests {
             sources: vec![],
             primary_source: source,
             video_path: None,
+            video_processing: None,
             video_offset_seconds: 0.,
             segments: vec![],
             overlay_snapshot: None,
@@ -1451,6 +1457,7 @@ mod tests {
             sources: vec![],
             primary_source: source,
             video_path: None,
+            video_processing: None,
             video_offset_seconds: 0.0,
             segments: vec![],
             overlay_snapshot: None,

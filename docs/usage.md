@@ -232,8 +232,8 @@ muted. Original source audio is still preserved in Overlay exports.
 Select **Overlay** in the mode bar for the original editor, or choose
 **Edit overlay / advanced sync** on an analysis recording to edit that recording's project.
 
-1. Create a project and select a stitched or reframed video exported by
-   Insta360 Studio. Raw dual-lens stitching is intentionally left to Studio.
+1. Create a project and select a stitched/reframed video, or a standard SDR
+   X4 Air dual-track INSV for direct processing (see below).
 2. Add one or more telemetry sources. For an Insta360 recording, select the
    matching LRV when available; it is much smaller than the INSV and contains
    the same sensor trailer. For an AiM logger, use **+ MyChron XRK** and select
@@ -393,3 +393,47 @@ supplies neither their labels nor calibration.
 Projects use the `.race-overlay.json` suffix. They store media paths, layout,
 bindings, source calibration and synchronization, but do not copy the source
 media.
+
+## Direct X4 Air video
+
+Standard SDR X4 Air dual-track INSV recordings can be imported directly. Both
+fisheye video tracks are projected into one 16:9 view. Other camera models,
+paired-file layouts, HDR/log video, speed ramps, automatic segment joining, and
+automatic LRV video proxies are not supported by this path. Unsupported or
+incomplete optical metadata produces an error.
+
+Importing an INSV adds its video and camera telemetry as one recording. Attaching
+one to an existing recording preserves its other sources and selected primary
+source. Matching camera telemetry is reused rather than added again.
+
+In an Analysis video pane, drag the image with the primary mouse button to aim and
+scroll over the image to change horizontal FOV. These controls work while paused
+or playing and do not change the linked clock, selected lap, or alignment mode.
+FOV ranges from 30° to 150°, starting at 90°. The controls above the image also
+provide roll, reset, seam mode, stabilization, and export resolution. Panes showing
+the same recording share the settings; different recordings remain independent.
+Settings are saved in the workspace and carried into that recording's Overlay
+project. In Overlay, enable **Reframe video** to aim/zoom; leave it disabled to
+position widgets.
+
+**Hard cut** is the default seam. **Feather** blends across a narrow transition,
+initially 2°, within the valid lens overlap. Nearby objects can jump at a hard cut
+or appear doubled with feathering because the two lenses see them from different
+positions. Uncovered pixels remain black. Advanced stitching is currently
+unavailable; its prototype and acceptance status are documented in
+[raw-video validation](raw-video.md).
+
+**Stabilize** is off by default. It smooths camera vibration while following slower
+turns and banking. The smoothing control is Gaussian standard deviation in seconds
+(default 0.25 s), using a symmetric ±3σ window. This is camera-motion smoothing;
+it does not lock the horizon or world direction. It uses the original optical-rig
+gyro data separately from vehicle calibration and telemetry filters, and does not
+alter plotted or exported telemetry. Preparation happens in a background worker.
+Missing gyro coverage is shown as unavailable. Stabilized export requires valid
+motion coverage over the video; disable stabilization to export without it.
+
+Raw export defaults to **1080p (1920 × 1080)**, with **2160p (3840 × 2160)** available.
+It uses the same view, seam, and stabilization policy as preview, draws overlays
+after projection, and copies the original AAC audio. An intermediate stitched
+video is not needed. Preview decoding uses reduced-resolution lens frames;
+export decodes the original lens resolution. Video time starts at the first frame.

@@ -1,7 +1,10 @@
 # Race Overlay
 
 A cross-platform Rust desktop application for comparing motorsport telemetry
-and burning synchronized data overlays into video. It reads the IMU trailer in Insta360 INSV/LRV files,
+and burning synchronized data overlays into video. Standard SDR Insta360 X4 Air
+dual-track INSV can be reframed directly in Analysis, Overlay, and export, with
+hard-cut/feather seams and optional camera-motion smoothing. It reads the IMU
+trailer in Insta360 INSV/LRV files,
 AiM MyChron XRK logs, generic timestamped CSV, or deterministic synthetic race
 data.
 
@@ -239,3 +242,18 @@ component under its own license. The macOS and Windows bundles use an
 LGPL-2.1-or-later FFmpeg configuration. The FFmpeg executable in the Linux
 bundle enables x264 and x265 and is therefore distributed under
 GPL-2.0-or-later. See [third-party notices](THIRD_PARTY_NOTICES.md).
+
+### Direct X4 Air video
+
+Open a standard SDR dual-track `.insv` to import video and camera telemetry together.
+Drag directly on an Analysis video image to aim; scroll to change horizontal FOV.
+In Overlay, enable **Reframe video** to use these gestures. View settings belong to
+recordings and survive saving and Analysis–Overlay handoffs. Output is 1080p or
+2160p with original AAC audio. Ordinary video workflows remain available.
+
+GPU projection uses the existing wgpu stack. macOS decoding uses FFmpeg's
+VideoToolbox support; other platforms currently use software decoding. CPU
+projection is available when no GPU adapter is available, with reduced performance.
+No OpenCV or Python installation is needed to run these features. See
+[usage](docs/usage.md#direct-x4-air-video) and [validation/status](docs/raw-video.md)
+for supported inputs, performance evidence, and outstanding release gates.

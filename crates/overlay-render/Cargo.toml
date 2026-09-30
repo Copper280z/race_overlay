@@ -9,6 +9,9 @@ overlay-core = { path = "../overlay-core" }
 serde.workspace = true
 serde_json.workspace = true
 tiny-skia.workspace = true
+wgpu = "30.0.1"
+pollster = "1.0"
+bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 image.workspace = true

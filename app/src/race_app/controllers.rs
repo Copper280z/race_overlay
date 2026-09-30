@@ -6,7 +6,7 @@ use super::editor::{CorrelationEstimate, WorkerEvent};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use overlay_core::{ChannelRef, SourceId, WidgetId};
-use overlay_media::{CancelToken, PreviewHandle, PreviewPlayback};
+use overlay_media::CancelToken;
 use std::collections::HashMap;
 
 pub(super) struct WorkerHub {
@@ -118,12 +118,13 @@ pub(super) struct PlotEditor {
 }
 
 pub(super) struct PreviewController {
-    pub(super) preview: Option<PreviewHandle>,
-    pub(super) preview_playback: Option<PreviewPlayback>,
+    pub(super) preview: Option<crate::video_processing::VideoPreview>,
+    pub(super) preview_playback: Option<crate::video_processing::VideoPlayback>,
     pub(super) video_texture: Option<egui::TextureHandle>,
     pub(super) overlay_texture: Option<egui::TextureHandle>,
     pub(super) pending_overlay_image: Option<egui::ColorImage>,
     pub(super) playing: bool,
+    pub(super) reframing: bool,
 }
 
 pub(super) struct ExportController {

@@ -2435,6 +2435,7 @@ name = "overlay-core"
 version = "0.1.0-alpha.5"
 dependencies = [
  "csv",
+ "prost",
  "serde",
  "serde_json",
  "telemetry-parser",
@@ -2459,11 +2460,14 @@ dependencies = [
 name = "overlay-render"
 version = "0.1.0-alpha.5"
 dependencies = [
+ "bytemuck",
  "image",
  "overlay-core",
+ "pollster 1.0.1",
  "serde",
  "serde_json",
  "tiny-skia",
+ "wgpu",
 ]
 
 [[package]]

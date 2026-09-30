@@ -62,6 +62,7 @@ fn analysis_calibration_creates_and_prefers_vehicle_lateral_acceleration() {
         sources: vec![logger, camera],
         primary_source: logger_id,
         video_path: Some("video.mp4".into()),
+        video_processing: None,
         video_offset_seconds: 0.0,
         segments: vec![],
         overlay_snapshot: None,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::analysis_maps::{color_map, sample_value};
 use egui_plot::{Legend, Line, Plot, Points, VLine};
-use overlay_media::{AnalysisPreviewConfig, PreviewSize};
+use overlay_media::PreviewSize;
 
 fn legend_editor(
     ui: &mut egui::Ui,
@@ -887,6 +887,7 @@ impl AnalysisApp {
             .recordings
             .iter()
             .find(|r| r.id == key.recording_id)
+            .cloned()
         else {
             return;
         };
@@ -898,6 +899,26 @@ impl AnalysisApp {
             ui.label("No video attached. Telemetry is ready to compare.");
             return;
         };
+        let mut processing = recording
+            .video_processing
+            .clone()
+            .or_else(|| crate::video_processing::default_processing(&path));
+        if let Some(config) = &mut processing {
+            ui.push_id(id, |ui| {
+                crate::video_processing::controls(ui, config);
+            });
+        }
+        if processing != recording.video_processing {
+            if let Some(target) = self
+                .workspace
+                .recordings
+                .iter_mut()
+                .find(|r| r.id == recording.id)
+            {
+                target.video_processing = processing.clone();
+            }
+            self.dirty = true;
+        }
         let Some(tools) = tools else {
             ui.label("FFmpeg unavailable. Telemetry analysis is unaffected.");
             return;
@@ -942,10 +963,14 @@ impl AnalysisApp {
         if options.linked {
             options.time = timestamp;
         }
-        ui.small(format!("{} · exported video {:.3}s", run.name, timestamp));
+        ui.small(format!("{} · video {:.3}s", run.name, timestamp));
         let width = ((ui.available_width().clamp(160.0, 960.0) as u32) / 32 * 32).max(160);
-        let height =
-            (width as f64 * metadata.height as f64 / metadata.width.max(1) as f64).round() as u32;
+        let height = (if processing.is_some() {
+            width as f64 * 9.0 / 16.0
+        } else {
+            width as f64 * metadata.height as f64 / metadata.width.max(1) as f64
+        })
+        .round() as u32;
         let height = height.max(2);
         let size = PreviewSize::new(width, height);
         if self.videos.get(&id).is_none_or(|v| v.path != path) {
@@ -953,14 +978,14 @@ impl AnalysisApp {
                 id,
                 VideoRuntime {
                     path: path.clone(),
-                    decoder: AnalysisPreview::spawn_with_config(
+                    decoder: crate::video_processing::VideoPreview::spawn(
                         tools.clone(),
                         path,
-                        AnalysisPreviewConfig {
-                            output_fps: 30.0,
-                            source_fps: metadata.fps(),
-                        },
+                        processing.clone(),
+                        metadata.fps(),
+                        false,
                     ),
+                    processing: processing.clone(),
                     texture: None,
                     requested: None,
                     error: None,
@@ -968,9 +993,15 @@ impl AnalysisApp {
             );
         }
         let runtime = self.videos.get_mut(&id).unwrap();
-        if runtime
-            .requested
-            .is_none_or(|(t, w, h)| (t - timestamp).abs() > 1.0 / 60.0 || w != width || h != height)
+        let processing_changed = runtime.processing != processing;
+        runtime.processing = processing.clone();
+        if let Some(config) = &processing {
+            runtime.decoder.set_config(config);
+        }
+        if processing_changed
+            || runtime.requested.is_none_or(|(t, w, h)| {
+                (t - timestamp).abs() > 1.0 / 60.0 || w != width || h != height
+            })
         {
             if let Err(e) = runtime.decoder.request(timestamp, size) {
                 runtime.error = Some(e.to_string());
@@ -997,20 +1028,54 @@ impl AnalysisApp {
                         }
                     }
                 }
-                Err(e) => runtime.error = Some(e.to_string()),
+                Err(e) => {
+                    runtime.error = Some(e.to_string());
+                    if processing.is_some() {
+                        runtime.texture = None;
+                    }
+                }
             }
         }
         if let Some(error) = &runtime.error {
             ui.colored_label(egui::Color32::LIGHT_RED, error);
         }
         if let Some(texture) = &runtime.texture {
-            ui.add(
+            let response = ui.add(
                 egui::Image::new(texture)
                     .max_size(ui.available_size())
-                    .maintain_aspect_ratio(true),
+                    .maintain_aspect_ratio(true)
+                    .sense(if processing.is_some() {
+                        egui::Sense::drag()
+                    } else {
+                        egui::Sense::hover()
+                    }),
             );
+            if let Some(config) = &mut processing
+                && crate::video_processing::gestures(ui, &response, config)
+            {
+                runtime.decoder.set_config(config);
+                runtime.processing = Some(config.clone());
+                if let Err(e) = runtime.decoder.request(timestamp, size) {
+                    runtime.error = Some(e.to_string());
+                }
+            }
         } else {
             ui.spinner();
+        }
+        let status = runtime.decoder.status();
+        if !status.is_empty() {
+            ui.weak(status);
+        }
+        if processing != recording.video_processing {
+            if let Some(target) = self
+                .workspace
+                .recordings
+                .iter_mut()
+                .find(|r| r.id == recording.id)
+            {
+                target.video_processing = processing;
+            }
+            self.dirty = true;
         }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(33));

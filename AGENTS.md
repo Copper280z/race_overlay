@@ -3,8 +3,10 @@
 Race Overlay is a Rust desktop application for comparing racing telemetry and
 burning configurable overlays into onboard video. Analysis and Overlay are
 complementary workflows over the same recordings and project data. Camera video
-is expected to have already been stitched or reframed; this project does not
-process raw dual-lens footage.
+can be an ordinary stitched/reframed video or standard SDR X4 Air
+dual-track INSV. Raw projection and optional gyro stabilization share a pipeline
+across live Analysis, Overlay preview, and export. Advanced stitching remains
+subject to the live-preview release gate described in `docs/raw-video.md`.
 
 ## Design principles
 
@@ -50,10 +52,11 @@ process raw dual-lens footage.
   course geometry, `comparison/` preparation and alignment strategies,
   `processing.rs` filtering, `calibration.rs` IMU calibration, and
   `adapters.rs`/`xrk.rs` data ingestion.
-- `crates/overlay-render`: widget preparation and RGBA rendering; no UI or media
-  orchestration.
+- `crates/overlay-render`: widget preparation and RGBA rendering; `video/` owns
+  offscreen wgpu/CPU projection and stitching backends. No UI/media orchestration.
 - `crates/overlay-media`: FFmpeg discovery, probing, preview, synchronization,
-  audio, and final export.
+  audio, and final export. `processed/` pairs raw lens frames by integer PTS and
+  accepts a caller-provided processor, without depending on the app or renderer.
 - `docs/usage.md`: user-visible behavior. `README.md`: installation and project
   introduction. `scripts/` and `packaging/`: release packaging.
 - `mychron_data`: optional local recordings for manual XRK validation; never a

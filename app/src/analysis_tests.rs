@@ -37,6 +37,7 @@ fn recording(name: &str, source: SourceConfig, segment_name: &str) -> (Recording
             sources: vec![source.clone()],
             primary_source: source.id,
             video_path: None,
+            video_processing: None,
             video_offset_seconds: 0.,
             segments: vec![segment],
             overlay_snapshot: None,
@@ -1308,4 +1309,63 @@ fn supplied_autocross_runs_get_best_effort_time_alignment() {
             .coefficient
             .is_some_and(|value| value.abs() > 0.75)
     );
+}
+
+#[test]
+fn raw_attachment_keeps_primary_sources_and_deduplicates_camera() {
+    let mut app = AnalysisApp::new();
+    let primary = SourceId::new();
+    let (mut r, key) = recording("run", source("logger", primary), "lap");
+    r.video_offset_seconds = 3.0;
+    let id = r.id;
+    app.workspace.recordings.push(r);
+    app.state.selection = vec![key.clone()];
+    let path = PathBuf::from("synthetic-camera.insv");
+    app.attach_video(id, path.clone());
+    app.attach_video(id, path.clone());
+    let r = &app.workspace.recordings[0];
+    assert_eq!(r.primary_source, primary);
+    assert_eq!(r.sources.len(), 2);
+    assert_eq!(r.sources[0].name, "logger");
+    assert_eq!(r.sources[1].alignment.offset_seconds, 3.0);
+    assert_eq!(r.video_path.as_ref(), Some(&path));
+    assert!(r.video_processing.is_some());
+    assert_eq!(app.state.selection, vec![key]);
+    app.attach_video(id, "ordinary.mp4".into());
+    assert!(app.workspace.recordings[0].video_processing.is_none());
+    assert_eq!(app.workspace.recordings[0].sources.len(), 2);
+}
+
+#[test]
+fn raw_view_round_trip_preserves_recording_identity_and_timing() {
+    let mut app = AnalysisApp::new();
+    let primary = SourceId::new();
+    let (mut recording, key) = recording("run", source("logger", primary), "lap");
+    recording.video_path = Some("camera.insv".into());
+    recording.video_offset_seconds = 4.;
+    recording.video_processing = Some(overlay_core::VideoProcessingConfig::default());
+    let id = recording.id;
+    app.workspace.recordings.push(recording);
+    app.state.selection = vec![key.clone()];
+    app.active_overlay = Some(id);
+    let mut project = overlay_core::project_from_recording(&app.workspace.recordings[0]);
+    let config = project.video_processing.as_mut().unwrap();
+    config.view.yaw = 101.;
+    config.horizontal_fov_degrees = 62.;
+    config
+        .unknown
+        .insert("future_stitcher".into(), json!({"quality":3}));
+    let expected = config.clone();
+    app.import_project(project);
+    let r = &app.workspace.recordings[0];
+    assert_eq!(r.id, id);
+    assert_eq!(r.primary_source, primary);
+    assert_eq!(r.video_offset_seconds, 4.);
+    assert_eq!(r.video_processing.as_ref(), Some(&expected));
+    assert_eq!(app.state.selection, vec![key]);
+    let json = serde_json::to_string(&app.workspace).unwrap();
+    let reopened: AnalysisWorkspace = serde_json::from_str(&json).unwrap();
+    let p = overlay_core::project_from_recording(&reopened.recordings[0]);
+    assert_eq!(p.video_processing, Some(expected));
+    assert_eq!(p.sources[0].alignment.offset_seconds, -4.);
 }

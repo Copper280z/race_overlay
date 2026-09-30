@@ -15,7 +15,7 @@ use std::{
 
 pub type ExportError = MediaError;
 
-fn part_path(output: &Path) -> PathBuf {
+pub(crate) fn part_path(output: &Path) -> PathBuf {
     let parent = output.parent().unwrap_or_else(|| Path::new(""));
     match (output.file_stem(), output.extension()) {
         (Some(stem), Some(ext)) => parent.join(format!(
@@ -301,7 +301,7 @@ fn apple_codec_tag(encoder: &str) -> Option<&'static str> {
     }
 }
 
-fn validate_settings(settings: &ExportSettings) -> Result<(), MediaError> {
+pub(crate) fn validate_settings(settings: &ExportSettings) -> Result<(), MediaError> {
     if settings.bitrate == Some(0) {
         return Err(MediaError::Invalid(
             "video bitrate must be greater than zero".into(),
@@ -336,7 +336,7 @@ fn command_for(
     c
 }
 
-fn choose_encoder(
+pub(crate) fn choose_encoder(
     settings: &ExportSettings,
     metadata: &VideoMetadata,
     capabilities: &EncoderCapabilities,

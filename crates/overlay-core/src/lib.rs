@@ -10,6 +10,7 @@ pub mod comparison;
 pub mod processing;
 pub mod project;
 pub mod telemetry;
+pub mod video;
 mod xrk;
 
 pub use adapters::*;
@@ -19,3 +20,4 @@ pub use comparison::*;
 pub use processing::*;
 pub use project::*;
 pub use telemetry::*;
+pub use video::*;

@@ -11,6 +11,7 @@ mod export;
 mod ffmpeg;
 mod preview;
 mod probe;
+mod processed;
 mod sync;
 
 pub use analysis_preview::{AbsolutePreview, AnalysisPreview, AnalysisPreviewConfig};
@@ -27,6 +28,10 @@ pub use preview::{
     PreviewFrame, PreviewHandle, PreviewPlayback, PreviewRequest, PreviewSize, PreviewWorker,
 };
 pub use probe::{AudioMetadata, VideoMetadata, probe, probe_video};
+pub use processed::{
+    DualVideoDecoder, DualVideoInfo, LensFramePair, ProcessedPreview, VideoFrameProcessor,
+    export_processed_video, probe_dual_video,
+};
 pub use sync::{AlignmentResult, align_audio};
 
 pub use ffmpeg::Rational;

@@ -7,7 +7,7 @@ use overlay_core::{
     AnalysisSourceData as SourceData, PreparedComparison as Prepared,
     PreparedComparisonRun as PreparedRun,
 };
-use overlay_media::{AlignmentResult, AnalysisPreview, FfmpegTools, VideoMetadata};
+use overlay_media::{AlignmentResult, FfmpegTools, VideoMetadata};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},

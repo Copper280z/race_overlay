@@ -1,9 +1,9 @@
 //! Serializable Analysis UI state and view-only runtime models.
 
 use crate::analysis_maps::MapSettings;
+use crate::video_processing::VideoPreview;
 use eframe::egui;
 use overlay_core::{ChannelRef, PreparedComparison as Prepared, RecordingId, SegmentRef, Unit};
-use overlay_media::AnalysisPreview;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -194,9 +194,10 @@ pub(super) fn automatic_default_mode(prepared: &Prepared, reference: Option<&Seg
 
 pub(super) struct VideoRuntime {
     pub(super) path: PathBuf,
-    pub(super) decoder: AnalysisPreview,
+    pub(super) decoder: VideoPreview,
     pub(super) texture: Option<egui::TextureHandle>,
     pub(super) requested: Option<(f64, u32, u32)>,
+    pub(super) processing: Option<overlay_core::VideoProcessingConfig>,
     pub(super) error: Option<String>,
 }
 

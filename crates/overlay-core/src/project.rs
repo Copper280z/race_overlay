@@ -126,6 +126,8 @@ pub struct ExportConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProjectV1 {
     pub video_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_processing: Option<crate::VideoProcessingConfig>,
     /// Project-wide visual theme. The renderer owns the schema so new palette
     /// fields can be added without changing the stable project envelope.
     #[serde(default)]
@@ -145,6 +147,7 @@ impl ProjectV1 {
     pub fn new(video_path: impl Into<PathBuf>) -> Self {
         Self {
             video_path: video_path.into(),
+            video_processing: None,
             // Keep the canonical default explicit in newly-created projects.
             // Individual palette values remain optional and are resolved by
             // the renderer from this preset.

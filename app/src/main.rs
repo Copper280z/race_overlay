@@ -8,6 +8,7 @@ mod analysis_imagery;
 mod analysis_maps;
 mod app_paths;
 mod race_app;
+mod video_processing;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

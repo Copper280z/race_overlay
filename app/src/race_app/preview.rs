@@ -6,6 +6,27 @@ use eframe::egui;
 
 impl OverlayEditor {
     pub(in crate::race_app) fn preview_ui(&mut self, ui: &mut egui::Ui) {
+        let mut processing = self.project().and_then(|p| p.video_processing.clone());
+        if let Some(config) = &mut processing {
+            ui.checkbox(
+                &mut self.preview_controller.reframing,
+                "Reframe video (drag to aim, scroll for FOV)",
+            );
+            if crate::video_processing::controls(ui, config) {
+                if let Some(overlay_core::ProjectDocument::V1(project)) = self.session.project_mut()
+                {
+                    project.video_processing = Some(config.clone());
+                }
+                self.request_preview();
+            }
+        }
+        if let Some(preview) = &self.preview_controller.preview {
+            let status = preview.status();
+            if !status.is_empty() {
+                ui.weak(status);
+            }
+        }
+        let reframing = processing.is_some() && self.preview_controller.reframing;
         let available = ui.available_size();
         let aspect = PREVIEW_W as f32 / PREVIEW_H as f32;
         let mut width = available.x;
@@ -49,7 +70,8 @@ impl OverlayEditor {
             let handle = egui::Rect::from_center_size(wr.right_bottom(), egui::vec2(14.0, 14.0));
             ui.painter().rect_filled(handle, 2.0, egui::Color32::YELLOW);
         }
-        if (response.drag_started() || response.clicked())
+        if !reframing
+            && (response.drag_started() || response.clicked())
             && let Some(pos) = response.interact_pointer_pos()
         {
             let n = egui::pos2(
@@ -78,7 +100,7 @@ impl OverlayEditor {
                         && (n.y - (w.rect.y + w.rect.height)).abs() < 0.05
                 });
         }
-        if response.dragged() {
+        if !reframing && response.dragged() {
             let delta = ui.input(|i| i.pointer.delta());
             let nd = egui::vec2(delta.x / rect.width(), delta.y / rect.height());
             let resizing = self.widget_editor.resizing_widget;
@@ -94,6 +116,21 @@ impl OverlayEditor {
                     widget.rect.y = (widget.rect.y + nd.y).clamp(0.0, 1.0 - widget.rect.height);
                 }
                 self.refresh_overlay();
+            }
+        }
+        if reframing
+            && let Some(config) = &mut processing
+            && crate::video_processing::gestures(ui, &response, config)
+        {
+            if let Some(overlay_core::ProjectDocument::V1(project)) = self.session.project_mut() {
+                project.video_processing = Some(config.clone());
+            }
+            self.request_preview();
+        }
+        if let Some(preview) = &self.preview_controller.preview {
+            let status = preview.status();
+            if !status.is_empty() {
+                ui.weak(status);
             }
         }
         ui.horizontal(|ui| {

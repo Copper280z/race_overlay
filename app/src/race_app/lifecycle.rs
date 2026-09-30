@@ -11,8 +11,7 @@ use overlay_core::{
     AdapterRegistry, ProjectDocument, ProjectV1, SourceConfig, SourceId, SyntheticConfig,
 };
 use overlay_media::{
-    AlignmentResult, FfmpegConfig, PreviewWorker, align_audio, discover, extract_mono_pcm,
-    probe_video,
+    AlignmentResult, FfmpegConfig, align_audio, discover, extract_mono_pcm, probe_video,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -91,6 +90,7 @@ impl OverlayEditor {
                 overlay_texture: None,
                 pending_overlay_image: None,
                 playing: false,
+                reframing: false,
             },
             export_controller: ExportController {
                 export_cancel: None,
@@ -117,8 +117,7 @@ impl OverlayEditor {
 
     pub(in crate::race_app) fn open_analysis_overlay(&mut self, project: ProjectV1) -> bool {
         if project.video_path.as_os_str().is_empty() {
-            self.status =
-                "Attach an exported video to this recording before opening its overlay.".into();
+            self.status = "Attach a video to this recording before opening its overlay.".into();
             return false;
         }
         if let Err(error) = self.initialize_video(project.video_path.clone()) {
@@ -131,6 +130,7 @@ impl OverlayEditor {
         self.session.set_project_path(None);
         let sources = project.sources.clone();
         self.session.set_project(project.into());
+        self.request_preview();
         self.origin = OverlayOrigin::Analysis;
         self.apply_panel_action(PanelAction::ClearSourceSelection);
         self.apply_panel_action(PanelAction::ClearWidgetSelection);
@@ -214,7 +214,13 @@ impl OverlayEditor {
             .clamp(1.0, 200.0);
         self.export_controller.export_codec = ExportCodecChoice::MatchSource;
         self.export_controller.export_match_bitrate = true;
-        self.preview_controller.preview = Some(PreviewWorker::spawn(tools.clone(), &path));
+        self.preview_controller.preview = Some(crate::video_processing::VideoPreview::spawn(
+            tools.clone(),
+            path.clone(),
+            crate::video_processing::default_processing(&path),
+            metadata.fps(),
+            true,
+        ));
         self.session.set_metadata(metadata);
         self.preview_controller.video_texture = None;
         self.preview_controller.overlay_texture = None;
@@ -225,7 +231,7 @@ impl OverlayEditor {
 
     pub(super) fn open_video(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Video", &["mp4", "mov", "mkv"])
+            .add_filter("Video", &["mp4", "mov", "mkv", "insv"])
             .pick_file()
         else {
             return;
@@ -233,7 +239,20 @@ impl OverlayEditor {
         match self.initialize_video(path.clone()) {
             Ok(()) => {
                 self.invalidate_session_sources();
+                let processing = crate::video_processing::default_processing(&path);
                 let mut p = ProjectV1::new(path);
+                p.video_processing = processing;
+                if p.video_processing.is_some() {
+                    p.sources.push(SourceConfig {
+                        id: SourceId::new(),
+                        name: "Camera telemetry".into(),
+                        adapter: "insta360".into(),
+                        path: p.video_path.clone(),
+                        alignment: Default::default(),
+                        settings: json!({}),
+                        unknown: BTreeMap::new(),
+                    });
+                }
                 p.appearance = appearance_for_preset("race_dark");
                 p.widgets = default_widgets_for(self.unit_system());
                 self.session.set_project(p.into());
@@ -245,7 +264,15 @@ impl OverlayEditor {
                 self.widget_editor.selected_widget = self
                     .project()
                     .and_then(|project| project.widgets.first().map(|widget| widget.id));
-                self.status = "Video opened. Add the matching LRV/INSV or synthetic data.".into();
+                if self.project().is_some_and(|p| p.video_processing.is_some()) {
+                    for source in self.project().unwrap().sources.clone() {
+                        self.load_source_async(source);
+                    }
+                    self.status = "Raw video opened; drag in Reframe mode to aim.".into();
+                } else {
+                    self.status =
+                        "Video opened. Add the matching LRV/INSV or synthetic data.".into();
+                }
                 self.refresh_overlay();
             }
             Err(e) => self.status = e,
@@ -271,6 +298,7 @@ impl OverlayEditor {
                 self.invalidate_correlation();
                 self.session.set_project_path(Some(path));
                 self.session.set_project(doc);
+                self.request_preview();
                 self.origin = OverlayOrigin::Standalone;
                 self.source_editor.calibration_low_pass_hz = self
                     .project()

@@ -7,8 +7,8 @@ use super::{
 };
 use eframe::egui;
 use overlay_core::{
-    AdapterRegistry, ProjectV1, Recording, RecordingId, SourceConfig, SourceId, auto_segments,
-    gps_points, prepare_comparison, prepare_loaded_dataset, recording_from_project,
+    AdapterRegistry, ProjectV1, Recording, RecordingId, SourceAlignment, SourceConfig, SourceId,
+    auto_segments, gps_points, prepare_comparison, prepare_loaded_dataset, recording_from_project,
 };
 use overlay_media::{AlignmentResult, VideoMetadata};
 use serde_json::{Value, json};
@@ -138,6 +138,22 @@ impl AnalysisApp {
         });
     }
     fn add_telemetry(&mut self, path: PathBuf) -> RecordingId {
+        if crate::video_processing::raw_path(&path)
+            && let Some(id) = self
+                .workspace
+                .recordings
+                .iter()
+                .find(|r| {
+                    r.sources.iter().any(|s| {
+                        is_camera_telemetry_source(s)
+                            && overlay_core::same_camera_recording(&s.path, &path)
+                    })
+                })
+                .map(|r| r.id)
+        {
+            self.attach_video(id, path);
+            return id;
+        }
         let name = path
             .file_stem()
             .and_then(|v| v.to_str())
@@ -157,7 +173,9 @@ impl AnalysisApp {
             name,
             sources: vec![source.clone()],
             primary_source: source.id,
-            video_path: None,
+            video_path: crate::video_processing::raw_path(&source.path)
+                .then(|| source.path.clone()),
+            video_processing: crate::video_processing::default_processing(&source.path),
             video_offset_seconds: 0.0,
             segments: vec![],
             overlay_snapshot: None,
@@ -216,6 +234,7 @@ impl AnalysisApp {
     }
     pub(super) fn attach_video(&mut self, id: RecordingId, path: PathBuf) {
         let mut camera_sources = Vec::new();
+        let mut new_source = None;
         if let Some(r) = self.workspace.recordings.iter_mut().find(|r| r.id == id) {
             if r.video_path.as_ref() != Some(&path) {
                 for source in r
@@ -227,7 +246,35 @@ impl AnalysisApp {
                     CameraVideoSyncMetadata::clear(&mut source.settings);
                 }
             }
+            if r.video_path.as_ref() != Some(&path) {
+                r.video_processing = crate::video_processing::default_processing(&path);
+            }
+            if crate::video_processing::raw_path(&path) {
+                if let Some(source) = r.sources.iter().find(|s| {
+                    is_camera_telemetry_source(s)
+                        && overlay_core::same_camera_recording(&s.path, &path)
+                }) {
+                    r.video_offset_seconds = source.alignment.offset_seconds;
+                } else {
+                    let source = SourceConfig {
+                        id: SourceId::new(),
+                        name: "Camera telemetry".into(),
+                        adapter: "insta360".into(),
+                        path: path.clone(),
+                        alignment: SourceAlignment {
+                            offset_seconds: r.video_offset_seconds,
+                        },
+                        settings: json!({}),
+                        unknown: Default::default(),
+                    };
+                    r.sources.push(source.clone());
+                    new_source = Some(source);
+                }
+            }
             r.video_path = Some(path);
+        }
+        if let Some(source) = new_source {
+            self.enqueue(source);
         }
         for source_id in camera_sources {
             self.video_sync.invalidate_audio(id, source_id);
