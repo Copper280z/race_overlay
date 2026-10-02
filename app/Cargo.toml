@@ -22,5 +22,11 @@ uuid.workspace = true
 image = { workspace = true, features = ["jpeg"] }
 ureq.workspace = true
 
+# Native menu bar; macOS only. Other platforms use the in-window header.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+
 [dev-dependencies]
 tempfile.workspace = true
+# Renders the real UI offscreen for the opt-in visual snapshot tests.
+egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }

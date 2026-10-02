@@ -6,11 +6,12 @@
 use overlay_core::{ChannelRef, CorrelationResult, RecordingId, SourceId};
 use overlay_media::AlignmentResult;
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod audio;
 mod calibration;
 mod correlation;
+mod pairing;
 #[cfg(test)]
 mod tests;
 mod ui;
@@ -141,6 +142,14 @@ pub(super) struct RecordingSyncState {
     pub(super) alignment_result: Option<Result<VideoAlignmentCandidate, String>>,
     pub(super) channels: Option<(ChannelRef, ChannelRef)>,
     pub(super) calibration_drafts: HashMap<SourceId, VehicleCalibrationDraft>,
+    /// Cameras whose default orientation has been applied (or attempted).
+    pub(super) auto_calibration_tried: HashSet<SourceId>,
+    /// A data log was just added to this video entry: sync it as soon as the
+    /// log, the camera audio match, and the camera calibration are ready.
+    pub(super) auto_sync_pending: bool,
+    /// The running logger/camera estimate was started automatically, so a
+    /// strong result is applied without asking.
+    pub(super) auto_sync_apply: bool,
 }
 
 #[derive(Default)]
@@ -151,6 +160,13 @@ pub(super) struct VideoSyncController {
 impl VideoSyncController {
     pub(super) fn recording(&self, id: RecordingId) -> Option<&RecordingSyncState> {
         self.recordings.get(&id)
+    }
+
+    /// True while an audio match or logger/camera correlation is running.
+    pub(super) fn has_jobs(&self) -> bool {
+        self.recordings
+            .values()
+            .any(|state| !state.audio_jobs.is_empty() || state.alignment_job.is_some())
     }
 
     pub(super) fn recording_mut(&mut self, id: RecordingId) -> &mut RecordingSyncState {
@@ -176,6 +192,7 @@ impl VideoSyncController {
             state.audio_jobs.remove(&source_id);
             state.audio_results.remove(&source_id);
             state.calibration_drafts.remove(&source_id);
+            state.auto_calibration_tried.remove(&source_id);
             if state.channels.as_ref().is_some_and(|(target, camera)| {
                 target.source_id == source_id || camera.source_id == source_id
             }) {
@@ -183,6 +200,7 @@ impl VideoSyncController {
             }
             state.alignment_job = None;
             state.alignment_result = None;
+            state.auto_sync_apply = false;
         }
     }
 

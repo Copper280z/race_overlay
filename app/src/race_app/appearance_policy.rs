@@ -17,13 +17,6 @@ pub(super) fn parse_unit_system(value: &str) -> Option<UnitSystem> {
     }
 }
 
-pub(super) fn unit_system_label(system: UnitSystem) -> &'static str {
-    match system {
-        UnitSystem::Metric => "Units: Metric",
-        UnitSystem::Imperial => "Units: Imperial",
-    }
-}
-
 pub(super) fn unit_name(unit: &Unit) -> &str {
     let symbol = unit.symbol();
     if symbol.is_empty() {

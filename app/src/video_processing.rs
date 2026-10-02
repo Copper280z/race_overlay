@@ -298,19 +298,54 @@ impl VideoPreview {
     }
 }
 
+/// Room the inline controls need; below this they fold into one menu.
+const INLINE_CONTROLS_WIDTH: f32 = 430.0;
+
 pub fn controls(ui: &mut egui::Ui, config: &mut VideoProcessingConfig) -> bool {
+    use crate::ui_kit::widgets;
     let before = config.clone();
-    ui.horizontal_wrapped(|ui| {
-        ui.add(egui::Slider::new(&mut config.horizontal_fov_degrees, 30.0..=150.0).text("FOV °"));
+    if ui.available_width() >= INLINE_CONTROLS_WIDTH {
+        basic_controls(ui, config);
+        widgets::popover(ui, "View ⏷", |ui| advanced_controls(ui, config));
+    } else {
+        widgets::popover(ui, "Video ⏷", |ui| {
+            widgets::section_label(ui, "Field of view");
+            basic_controls(ui, config);
+            advanced_controls(ui, config);
+        });
+    }
+    *config != before
+}
+
+/// The controls used most: field of view and stabilization.
+fn basic_controls(ui: &mut egui::Ui, config: &mut VideoProcessingConfig) {
+    ui.add(
+        egui::Slider::new(&mut config.horizontal_fov_degrees, 30.0..=150.0)
+            .text("Field of view")
+            .suffix("°"),
+    );
+    ui.checkbox(&mut config.stabilization.enabled, "Stabilize")
+        .on_hover_text("Smooth camera shake using the camera's gyro data");
+}
+
+/// Orientation, seam, stabilization smoothing, and export size.
+fn advanced_controls(ui: &mut egui::Ui, config: &mut VideoProcessingConfig) {
+    use crate::ui_kit::widgets;
+    widgets::section_label(ui, "Orientation");
+    ui.horizontal(|ui| {
         ui.add(
             egui::DragValue::new(&mut config.view.roll)
                 .speed(0.25)
                 .range(-180.0..=180.0)
-                .prefix("Roll ° "),
+                .prefix("Roll ")
+                .suffix("°"),
         );
         if ui.button("Reset view").clicked() {
             config.reset_view();
         }
+    });
+    widgets::section_label(ui, "Stitching seam");
+    ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt("video-seam")
             .selected_text(match config.seam.as_str() {
                 "hard_cut" => "Hard cut",
@@ -329,21 +364,22 @@ pub fn controls(ui: &mut egui::Ui, config: &mut VideoProcessingConfig) -> bool {
                     .suffix("° blend"),
             );
         }
-        ui.checkbox(&mut config.stabilization.enabled, "Stabilize");
-        if config.stabilization.enabled {
-            ui.add(
-                egui::Slider::new(&mut config.stabilization.sigma_seconds, 0.05..=1.0)
-                    .text("Smoothing s"),
-            );
-        }
-        egui::ComboBox::from_id_salt("video-output")
-            .selected_text(format!("Export {}p", config.output_height))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut config.output_height, 1080, "1080p");
-                ui.selectable_value(&mut config.output_height, 2160, "2160p");
-            });
     });
-    *config != before
+    if config.stabilization.enabled {
+        widgets::section_label(ui, "Stabilization");
+        ui.add(
+            egui::Slider::new(&mut config.stabilization.sigma_seconds, 0.05..=1.0)
+                .text("Smoothing")
+                .suffix(" s"),
+        );
+    }
+    widgets::section_label(ui, "Export size");
+    egui::ComboBox::from_id_salt("video-output")
+        .selected_text(format!("{}p", config.output_height))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut config.output_height, 1080, "1080p");
+            ui.selectable_value(&mut config.output_height, 2160, "2160p");
+        });
 }
 pub fn gestures(
     ui: &mut egui::Ui,
@@ -367,6 +403,10 @@ pub fn gestures(
     }
     *config != before
 }
+
+#[cfg(test)]
+#[path = "video_processing_benchmarks.rs"]
+mod benchmarks;
 
 #[cfg(test)]
 mod tests {

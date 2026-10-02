@@ -164,6 +164,50 @@ impl OverlayEditor {
                     .is_some_and(|p| p.playback_finished()))
     }
 
+    pub(super) fn document_name(&self) -> Option<String> {
+        self.session
+            .project_path()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+    }
+
+    pub(super) fn toggle_playback(&mut self) {
+        if !self.session.has_project() {
+            return;
+        }
+        if self.preview_controller.playing {
+            self.stop_playback();
+            self.request_preview();
+        } else {
+            self.start_playback();
+        }
+    }
+
+    pub(super) fn open_video_dialog(&mut self) {
+        self.open_video();
+    }
+
+    pub(super) fn open_project_dialog(&mut self) {
+        self.open_project();
+    }
+
+    pub(super) fn save_current_as(&mut self) {
+        if self.session.has_project() {
+            self.save_project(true);
+        }
+    }
+
+    pub(super) fn save_current(&mut self) {
+        if self.session.has_project() {
+            self.save_project(false);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn show_data_plot_for_test(&mut self, visible: bool) {
+        self.plot_editor.show_data_plot = visible;
+    }
+
     pub(super) fn plot_visible(&self) -> bool {
         self.plot_editor.show_data_plot
     }

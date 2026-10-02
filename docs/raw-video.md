@@ -85,6 +85,59 @@ passes the complete gate. Python/OpenCV are development-only tools here.
 The required formatting, workspace tests (167 passed), Clippy with warnings denied,
 and release build passed on this Mac.
 
+## Preview resolution comparison (2026-10-01)
+
+Apple M2, release Rust build, wgpu projection and VideoToolbox decoding. The local
+X4 Air recording and its Studio MP4 export were sampled sequentially near 5 s,
+at 30000/1001 source fps. Raw preview retained the existing 1024 × 1024 proxy per
+lens and enabled stabilization. Each backend size has 60 timed requests after
+warm-up, with size order reversed on the second pass.
+
+| Stage (median / p95) | 960 × 540 | 1920 × 1080 |
+| --- | --- | --- |
+| Ordinary MP4 Analysis backend | 7.50 / 16.58 ms | 9.04 / 18.26 ms |
+| Stabilized INSV backend | 12.15 / 12.94 ms | 12.15 / 12.94 ms |
+| GPU projection, source upload and readback | 2.13 / 2.26 ms | 2.51 / 2.56 ms |
+| Three-widget CPU rendering and UI color conversion | 1.89 / 2.45 ms | 6.52 / 6.63 ms |
+
+The isolated projection run uploads a lens pair every iteration and has 90 timed
+samples per size. The widget run uses the default G-force, speed and RPM widgets
+with synthetic telemetry and has 120 timed samples per size. Backend timings
+include request handling, decoding, resizing/projection and result polling, but
+exclude UI color conversion and texture upload. These stages were measured
+separately; this is not a paced playback or live egui presentation measurement.
+Multiple views, CPU projection fallback and different widget sets need separate
+checks. Increasing raw output size alone cannot restore detail lost in the lens
+proxy.
+
+### Lens proxy resolution
+
+On the same M2, a separate run retained stabilized 1920 × 1080 output and the
+default 90-degree field of view while changing the lens proxy size. Two
+persistent decoders delivered consecutive timestamp-matched frames; each size
+has 240 timed frames after warm-up across two reversed-order passes. Timings
+cover paired frame delivery and GPU projection, including source upload and
+output readback. Decoder startup, UI rendering and presentation are excluded.
+
+| Lens size | Pipeline median / p95 | RGBA bytes per lens pair |
+| --- | --- | --- |
+| 1024 × 1024 | 12.38 / 13.89 ms | 8 MiB |
+| 1536 × 1536 | 21.75 / 23.51 ms | 18 MiB |
+| 2048 × 2048 | 28.45 / 30.31 ms | 32 MiB |
+| 3840 × 3840 (original) | 49.53 / 54.33 ms | 112.5 MiB |
+
+The source HEVC tracks are decoded at their original dimensions in every case;
+the proxy setting controls the following scale/conversion and RGBA frame delivery.
+Larger proxies increase pipe traffic, allocations and GPU uploads, while a pair's
+byte count excludes decoder queues and GPU buffers. The 2048 case has little
+headroom before the 33.37 ms source-frame budget; original-size lenses exceed it.
+Same-frame 1080p images showed clearer lettering and edges with higher lens sizes.
+These short, unpaced measurements support evaluating 1536 for playback and larger
+sizes for paused inspection, but do not certify live multi-pane performance.
+
+Set `RACE_OVERLAY_PREVIEW_BENCH_DIR` when running
+`benchmark_preview_lens_resolutions` to save one same-frame PNG per lens size.
+
 ## Reproduce explicit checks
 
 Routine tests need no video fixture or FFmpeg. Local/GPU/media checks are ignored
@@ -95,6 +148,7 @@ cargo test -p overlay-core video:: -- --nocapture
 cargo test -p overlay-media processed::tests -- --ignored --nocapture
 cargo test -p overlay-render video::tests::gpu_matches_cpu -- --ignored --nocapture
 cargo test -p race-overlay supplied_raw_video_exports -- --ignored --nocapture
+cargo test --release -p race-overlay benchmark_preview -- --ignored --nocapture --test-threads=1
 cargo run --release -p race-overlay --example inspect_raw_video -- \
   VID_20260830_124108_00_017.insv /tmp/raw-validation 120 1800 paced
 ```

@@ -710,6 +710,12 @@ pub fn auto_segments(
     }]
 }
 
+/// Seconds kept before a detected autocross launch, so the staging and the
+/// start line are inside the interval rather than right at its edge.
+const AUTOCROSS_LEAD_IN_SECONDS: f64 = 3.0;
+
+/// The detected launch, moved earlier by [`AUTOCROSS_LEAD_IN_SECONDS`] but not
+/// before the first speed sample.
 fn autocross_launch_time(
     dataset: &TelemetryDataset,
     source_offset: f64,
@@ -774,10 +780,11 @@ fn autocross_launch_time(
             candidates.push((low_fraction * 2.0 + high_fraction + peak / 50.0, candidate));
         }
     }
+    let first = speed.samples.first()?.time;
     candidates
         .into_iter()
         .max_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.total_cmp(&a.1)))
-        .map(|(_, time)| time)
+        .map(|(_, launch)| (launch - AUTOCROSS_LEAD_IN_SECONDS).max(first))
 }
 pub fn gate_crossings(points: &[GpsPoint], gate: Gate) -> Vec<f64> {
     points
@@ -1466,7 +1473,8 @@ mod tests {
         let segments = auto_segments(&dataset, &recording, &[]);
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].kind, SegmentKind::Autocross);
-        assert!((segments[0].start_recording_time - 30.0).abs() < 0.2);
+        let lead_in = 30.0 - AUTOCROSS_LEAD_IN_SECONDS;
+        assert!((segments[0].start_recording_time - lead_in).abs() < 0.2);
         assert_eq!(segments[0].end_recording_time, 90.0);
         assert!(segments[0].competitive);
     }

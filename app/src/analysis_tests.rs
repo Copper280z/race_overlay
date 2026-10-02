@@ -233,7 +233,7 @@ fn imported_recording_selection_includes_every_available_interval() {
 }
 
 #[test]
-fn regular_plot_delta_uses_and_rebases_gate_defined_runs() {
+fn regular_plot_delta_is_measured_from_the_start_gate() {
     let source_a = SourceId::new();
     let source_b = SourceId::new();
     let (_, reference_key) = recording("reference", source("a", source_a), "run");
@@ -249,24 +249,21 @@ fn regular_plot_delta_uses_and_rebases_gate_defined_runs() {
             })
             .collect::<Vec<_>>()
     };
-    let run = |key: SegmentRef, name: &str, start: f64, end: f64, times| PreparedRun {
+    // Each interval begins a second before its run crosses the start gate.
+    let run = |key: SegmentRef, name: &str, start: f64, end: f64, times: [f64; 3]| PreparedRun {
         key,
         name: name.into(),
-        start,
+        start: start - 1.0,
         end,
         gps: vec![],
         distance: vec![],
         progress: progress(times),
         time_alignment: None,
+        start_gate: Some(times[0]),
+        finish_gate: None,
     };
     let mut app = AnalysisApp::new();
     app.workspace.reference = Some(reference_key.clone());
-    app.workspace.course.gates.push(Gate {
-        latitude: 0.0,
-        longitude: 0.0,
-        heading_degrees: 0.0,
-        width_meters: 12.0,
-    });
     app.state.selection = vec![reference_key.clone(), candidate_key.clone()];
     app.state.mode = XMode::Course;
     app.prepared.runs = vec![
@@ -276,7 +273,9 @@ fn regular_plot_delta_uses_and_rebases_gate_defined_runs() {
 
     let traces = app.build_plot(DELTA_CHANNEL, &PlotOptions::default(), UnitSystem::Metric);
     assert_eq!(traces.len(), 2);
-    assert_eq!(traces[1].points[0][0], [0.0, 0.0]);
+    // Without a reference course the axis is the reference's elapsed time,
+    // which starts a second before its gate.
+    assert_eq!(traces[1].points[0][0], [1.0, 0.0]);
     assert!((traces[1].points[0][2][1] - 0.8).abs() < 1e-9);
 }
 
@@ -326,6 +325,8 @@ fn scatter_aligns_xy_and_optional_z_on_recording_time() {
         distance: vec![],
         progress: vec![],
         time_alignment: None,
+        start_gate: None,
+        finish_gate: None,
     }];
     app.data
         .insert(source_id, SourceData::from_dataset(Arc::new(dataset)));
@@ -415,13 +416,26 @@ fn gate_capture_uses_pinned_reference_even_when_prepared_runs_are_stale() {
         distance: vec![],
         progress: vec![],
         time_alignment: None,
+        start_gate: None,
+        finish_gate: None,
     }];
 
-    let (recording_id, name, time, gate) = app.reference_gate_capture().unwrap();
+    let (recording_id, name, time, gate) = app.reference_gate_capture(0.0).unwrap();
     assert_eq!(recording_id, app.workspace.recordings[1].id);
     assert!(name.starts_with("pinned reference /"));
     assert!((time - 102.0).abs() < 0.11);
     assert!(gate.latitude > 41.0);
+
+    // The playhead cannot leave the run (here 100–110 s), but the nudge can,
+    // so a gate trimmed to its run can still be moved outward. GPS ends at
+    // 110 s: nothing is captured from where there is none.
+    app.state.cursor = 0.0;
+    let (_, _, at_start, start_gate) = app.reference_gate_capture(0.0).unwrap();
+    let (_, _, later, later_gate) = app.reference_gate_capture(5.0).unwrap();
+    assert!((later - at_start - 5.0).abs() < 0.11);
+    assert!(later_gate.latitude > start_gate.latitude);
+    assert!(app.reference_gate_capture(-5.0).is_none());
+    assert!(app.reference_gate_capture(30.0).is_none());
 }
 
 #[test]
@@ -498,68 +512,181 @@ fn retaining_gate_selection_does_not_add_the_last_run() {
     assert_eq!(app.state.selection, vec![first_key]);
 }
 
+/// A source whose GPS heads along a meridian through the given latitudes, one
+/// sample per second.
+fn northbound_gps(source_id: SourceId, latitudes: [f64; 4]) -> SourceData {
+    let channel = |name: &str, values: [f64; 4]| TelemetryChannel {
+        descriptor: ChannelDescriptor {
+            id: ChannelId::new(),
+            name: name.into(),
+            quantity: Quantity::Position,
+            unit: Unit::Degree,
+            interpolation: Interpolation::Linear,
+            description: None,
+        },
+        series: ChannelSeries::new(
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| TimedSample {
+                    time: index as f64,
+                    value,
+                })
+                .collect(),
+        )
+        .with_gap(2.0),
+    };
+    let mut dataset = TelemetryDataset {
+        source_id,
+        ..Default::default()
+    };
+    dataset.insert(channel("gps_latitude", latitudes));
+    dataset.insert(channel("gps_longitude", [0.0; 4]));
+    SourceData::from_dataset(Arc::new(dataset))
+}
+
+fn gate_at_latitude(latitude: f64) -> Gate {
+    Gate {
+        latitude,
+        longitude: 0.0,
+        heading_degrees: 0.0,
+        width_meters: 20.0,
+    }
+}
+
 #[test]
-fn applying_gates_preserves_selection_without_adding_an_unselected_run() {
+fn splitting_laps_preserves_selection_without_adding_an_unselected_run() {
     let first_source = SourceId::new();
     let second_source = SourceId::new();
     let (first, first_key) = recording("first", source("first", first_source), "run");
     let (second, second_key) = recording("second", source("second", second_source), "run");
-    let dataset = |source_id| {
-        let channel = |name: &str, values: [f64; 4]| TelemetryChannel {
-            descriptor: ChannelDescriptor {
-                id: ChannelId::new(),
-                name: name.into(),
-                quantity: Quantity::Position,
-                unit: Unit::Degree,
-                interpolation: Interpolation::Linear,
-                description: None,
-            },
-            series: ChannelSeries::new(
-                values
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, value)| TimedSample {
-                        time: index as f64,
-                        value,
-                    })
-                    .collect(),
-            )
-            .with_gap(2.0),
-        };
-        let mut dataset = TelemetryDataset {
-            source_id,
-            ..Default::default()
-        };
-        dataset.insert(channel("gps_latitude", [-0.001, 0.001, 0.0015, 0.0025]));
-        dataset.insert(channel("gps_longitude", [0.0; 4]));
-        SourceData::from_dataset(Arc::new(dataset))
-    };
+    let laps = [-0.001, 0.001, -0.001, 0.001];
     let mut app = AnalysisApp::new();
     app.workspace.recordings = vec![first, second];
     app.workspace.reference = Some(first_key.clone());
-    app.workspace.course.gates = vec![
-        Gate {
-            latitude: 0.0,
-            longitude: 0.0,
-            heading_degrees: 0.0,
-            width_meters: 20.0,
-        },
-        Gate {
-            latitude: 0.002,
-            longitude: 0.0,
-            heading_degrees: 0.0,
-            width_meters: 20.0,
-        },
-    ];
+    app.workspace.course.gates = vec![gate_at_latitude(0.0)];
     app.state.selection = vec![first_key.clone()];
-    app.data.insert(first_source, dataset(first_source));
-    app.data.insert(second_source, dataset(second_source));
+    app.data
+        .insert(first_source, northbound_gps(first_source, laps));
+    app.data
+        .insert(second_source, northbound_gps(second_source, laps));
 
-    app.apply_gates();
+    app.split_laps_at_gate();
 
     assert_eq!(app.state.selection, vec![first_key.clone()]);
     assert!(!app.state.selection.contains(&second_key));
     assert_eq!(app.workspace.reference, Some(first_key));
+    let lap = &app.workspace.recordings[0].segments[0];
+    assert!((lap.start_recording_time - 0.5).abs() < 1e-9);
+    assert!((lap.end_recording_time - 2.5).abs() < 1e-9);
+}
+
+#[test]
+fn point_to_point_gates_align_runs_at_the_start_gate_without_trimming() {
+    let reference_source = SourceId::new();
+    let candidate_source = SourceId::new();
+    let (mut reference, reference_key) =
+        recording("reference", source("reference", reference_source), "run");
+    let (mut candidate, candidate_key) =
+        recording("candidate", source("candidate", candidate_source), "run");
+    reference.segments[0].end_recording_time = 3.0;
+    candidate.segments[0].end_recording_time = 3.0;
+    let mut workspace = AnalysisWorkspace {
+        recordings: vec![reference, candidate],
+        reference: Some(reference_key.clone()),
+        ..Default::default()
+    };
+    workspace.course.gates = vec![gate_at_latitude(0.0), gate_at_latitude(0.002)];
+    let data = HashMap::from([
+        (
+            reference_source,
+            northbound_gps(reference_source, [-0.001, 0.001, 0.0015, 0.0025]),
+        ),
+        (
+            candidate_source,
+            northbound_gps(candidate_source, [-0.002, -0.0015, 0.0005, 0.001]),
+        ),
+    ]);
+    let selection = [reference_key, candidate_key];
+
+    let prepared = prepare_comparison(&workspace, &selection, &data);
+
+    let (reference, candidate) = (&prepared.runs[0], &prepared.runs[1]);
+    assert_eq!((reference.start, reference.end), (0.0, 3.0));
+    assert_eq!((candidate.start, candidate.end), (0.0, 3.0));
+    assert!((reference.start_gate.unwrap() - 0.5).abs() < 1e-9);
+    assert!((reference.finish_gate.unwrap() - 2.5).abs() < 1e-9);
+    assert!((candidate.start_gate.unwrap() - 1.75).abs() < 1e-9);
+    assert_eq!(candidate.finish_gate, None);
+    let alignment = candidate.time_alignment.as_ref().unwrap();
+    assert_eq!(alignment.channel, START_GATE_ALIGNMENT);
+    assert!((alignment.offset_seconds + 1.25).abs() < 1e-9);
+
+    workspace.course.gates.clear();
+    let prepared = prepare_comparison(&workspace, &selection, &data);
+    assert!(prepared.runs[1].start_gate.is_none());
+    assert!(
+        prepared.runs[1]
+            .time_alignment
+            .as_ref()
+            .is_none_or(|alignment| alignment.channel != START_GATE_ALIGNMENT)
+    );
+}
+
+#[test]
+fn plot_traces_mark_pieces_before_the_start_gate_as_outside() {
+    let source_id = SourceId::new();
+    let (mut recording, key) = recording("run", source("source", source_id), "run");
+    recording.segments[0].end_recording_time = 3.0;
+    let mut dataset = TelemetryDataset {
+        source_id,
+        ..Default::default()
+    };
+    dataset.insert(TelemetryChannel {
+        descriptor: ChannelDescriptor {
+            id: ChannelId::new(),
+            name: "gps_speed".into(),
+            quantity: Quantity::Speed,
+            unit: Unit::MeterPerSecond,
+            interpolation: Interpolation::Linear,
+            description: None,
+        },
+        series: ChannelSeries::new(
+            (0..4)
+                .map(|time| TimedSample {
+                    time: time as f64,
+                    value: 10.0,
+                })
+                .collect(),
+        )
+        .with_gap(2.0),
+    });
+    let mut app = AnalysisApp::new();
+    app.workspace.recordings = vec![recording];
+    app.workspace.reference = Some(key.clone());
+    app.state.selection = vec![key.clone()];
+    app.state.mode = XMode::Time;
+    app.prepared.runs = vec![PreparedRun {
+        key,
+        name: "run".into(),
+        start: 0.0,
+        end: 3.0,
+        gps: vec![],
+        distance: vec![],
+        progress: vec![],
+        time_alignment: None,
+        start_gate: Some(1.5),
+        finish_gate: None,
+    }];
+    app.data
+        .insert(source_id, SourceData::from_dataset(Arc::new(dataset)));
+
+    let traces = app.build_plot("gps_speed", &PlotOptions::default(), UnitSystem::Metric);
+
+    let xs = |piece: &Vec<[f64; 2]>| piece.iter().map(|point| point[0]).collect::<Vec<_>>();
+    assert_eq!(traces[0].outside_gates, vec![true, false]);
+    assert_eq!(xs(&traces[0].points[0]), vec![0.0, 1.0]);
+    assert_eq!(xs(&traces[0].points[1]), vec![1.0, 2.0, 3.0]);
 }
 
 #[test]
@@ -611,6 +738,8 @@ fn time_plot_interpolates_an_exact_gate_boundary_sample() {
         distance: vec![],
         progress: vec![],
         time_alignment: None,
+        start_gate: None,
+        finish_gate: None,
     }];
     app.data
         .insert(source_id, SourceData::from_dataset(Arc::new(dataset)));
@@ -794,6 +923,8 @@ fn stopped_reference_video_keeps_its_actual_elapsed_clock() {
         distance: progress.clone(),
         progress,
         time_alignment: None,
+        start_gate: None,
+        finish_gate: None,
     }];
     for mode in [XMode::Time, XMode::Distance, XMode::Course] {
         app.state.mode = mode;
@@ -814,7 +945,8 @@ fn distance_domain_lateral_alignment_zeroes_the_shared_start_not_the_run_middle(
         0.4 * (distance * 0.11).sin() + 0.9 * (-((distance - 32.0) / 5.0).powi(2)).exp()
             - 0.7 * (-((distance - 73.0) / 7.0).powi(2)).exp()
     };
-    let dataset = |id, delay: f64, speed: f64, duration: f64| {
+    // `creep` is the traveled-distance drift, in m/s, while staged.
+    let dataset = |id, delay: f64, speed: f64, duration: f64, creep: f64| {
         let mut dataset = TelemetryDataset {
             source_id: id,
             ..Default::default()
@@ -822,7 +954,7 @@ fn distance_domain_lateral_alignment_zeroes_the_shared_start_not_the_run_middle(
         let timed = (0..=(duration * 20.0) as usize)
             .map(|index| {
                 let time = index as f64 * 0.05;
-                let distance = ((time - delay) * speed).max(0.0);
+                let distance = time.min(delay) * creep + ((time - delay) * speed).max(0.0);
                 (time, distance)
             })
             .collect::<Vec<_>>();
@@ -874,11 +1006,11 @@ fn distance_domain_lateral_alignment_zeroes_the_shared_start_not_the_run_middle(
     let data = HashMap::from([
         (
             reference_source,
-            SourceData::from_dataset(dataset(reference_source, 0.0, 5.0, 20.0)),
+            SourceData::from_dataset(dataset(reference_source, 0.0, 5.0, 20.0, 0.0)),
         ),
         (
             target_source,
-            SourceData::from_dataset(dataset(target_source, 3.0, 4.0, 28.0)),
+            SourceData::from_dataset(dataset(target_source, 3.0, 4.0, 28.0, 0.0)),
         ),
     ]);
     let prepared = prepare_comparison(
@@ -908,6 +1040,34 @@ fn distance_domain_lateral_alignment_zeroes_the_shared_start_not_the_run_middle(
     assert_eq!(
         workspace.recordings[1].sources[0].alignment.offset_seconds,
         0.0
+    );
+
+    // Distance creeps while both cars are staged; the shift still matches
+    // their departures rather than the first sample of each interval.
+    let creeping = HashMap::from([
+        (
+            reference_source,
+            SourceData::from_dataset(dataset(reference_source, 0.5, 5.0, 20.0, 0.04)),
+        ),
+        (
+            target_source,
+            SourceData::from_dataset(dataset(target_source, 3.5, 4.0, 28.0, 0.04)),
+        ),
+    ]);
+    let creeping = prepare_comparison(
+        &workspace,
+        &[reference_key.clone(), target_key.clone()],
+        &creeping,
+    );
+    let alignment = creeping
+        .runs
+        .iter()
+        .find(|run| run.key == target_key)
+        .and_then(|run| run.time_alignment.as_ref())
+        .unwrap();
+    assert!(
+        (alignment.offset_seconds + 3.0).abs() <= 0.15,
+        "{alignment:?}"
     );
 
     let mut app = AnalysisApp::new();
@@ -1077,6 +1237,11 @@ fn panel_and_ui_settings_preserve_unknown_fields() {
     let input = json!({"future_ui":42});
     let state: UiState = serde_json::from_value(input).unwrap();
     assert_eq!(serde_json::to_value(state).unwrap()["future_ui"], 42);
+    let mut state: UiState = serde_json::from_value(json!({"future_ui":42})).unwrap();
+    state.stats_columns.insert(7, [90.0, 0.0, 45.0, 50.0, 60.0]);
+    let restored: UiState = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+    assert_eq!(restored.stats_columns[&7], [90.0, 0.0, 45.0, 50.0, 60.0]);
+    assert_eq!(restored.unknown["future_ui"], 42);
     let input = json!({"future_plot":"preserve"});
     let plot: PlotOptions = serde_json::from_value(input).unwrap();
     assert!(plot.show_legend);
@@ -1295,20 +1460,17 @@ fn supplied_autocross_runs_get_best_effort_time_alignment() {
     for run in &app.prepared.runs {
         assert!(run.end - run.start < 90.0, "{}", run.name);
     }
-    let alignment = app
-        .prepared
-        .runs
-        .iter()
-        .find(|run| Some(&run.key) != app.workspace.reference.as_ref())
-        .and_then(|run| run.time_alignment.as_ref())
-        .unwrap();
-    assert_eq!(alignment.channel, "lateral acceleration by distance");
+    let shift = |prepared: &PreparedComparison| {
+        prepared
+            .runs
+            .iter()
+            .find(|run| Some(&run.key) != app.workspace.reference.as_ref())
+            .and_then(|run| run.time_alignment.clone())
+            .unwrap()
+    };
+    let alignment = shift(&app.prepared);
+    assert_eq!(alignment.channel, "standing start");
     assert!(alignment.offset_seconds.abs() < 2.0, "{alignment:?}");
-    assert!(
-        alignment
-            .coefficient
-            .is_some_and(|value| value.abs() > 0.75)
-    );
 }
 
 #[test]
@@ -1368,4 +1530,197 @@ fn raw_view_round_trip_preserves_recording_identity_and_timing() {
     let p = overlay_core::project_from_recording(&reopened.recordings[0]);
     assert_eq!(p.video_processing, Some(expected));
     assert_eq!(p.sources[0].alignment.offset_seconds, -4.);
+}
+
+#[test]
+fn before_the_video_starts_its_first_frame_is_held() {
+    use super::views::hold_first_frame;
+    assert_eq!(hold_first_frame(-0.28), (0.0, 0.28));
+    assert_eq!(hold_first_frame(0.0), (0.0, 0.0));
+    assert_eq!(hold_first_frame(12.5), (12.5, 0.0));
+}
+
+#[test]
+fn channels_a_plot_lists_stay_choosable_when_no_source_has_them() {
+    let source_id = SourceId::new();
+    let (recording, _) = recording("run", source("source", source_id), "lap");
+    let mut app = AnalysisApp::new();
+    app.workspace.recordings = vec![recording];
+    let mut dataset = TelemetryDataset {
+        source_id,
+        ..Default::default()
+    };
+    dataset.insert(TelemetryChannel {
+        descriptor: ChannelDescriptor {
+            id: ChannelId::new(),
+            name: "lateral_g".into(),
+            quantity: Quantity::Acceleration,
+            unit: Unit::StandardGravity,
+            interpolation: Interpolation::Linear,
+            description: None,
+        },
+        series: ChannelSeries::new(vec![]),
+    });
+    app.data
+        .insert(source_id, SourceData::from_dataset(Arc::new(dataset)));
+
+    // The default plot lists speed and RPM, which this source lacks.
+    let selected = PlotOptions::default().channels;
+    let choices = app.channel_choices(&selected);
+    assert_eq!(&choices[..2], ["gps_speed", "rpm"]);
+    assert!(choices.contains(&"lateral_g".to_owned()));
+    assert_eq!(choices.last().map(String::as_str), Some(DELTA_CHANNEL));
+    // Once they are removed they are no longer offered.
+    assert!(!app.channel_choices(&[]).contains(&"rpm".to_owned()));
+}
+
+#[test]
+fn an_idle_workspace_asks_for_no_repaints() {
+    let mut app = AnalysisApp::new();
+    app.prepared_revision = app.revision;
+    assert!(!app.has_background_work());
+
+    app.loading.insert(SourceId::new(), 1);
+    assert!(app.has_background_work());
+    app.loading.clear();
+
+    app.preparing = true;
+    assert!(app.has_background_work());
+    app.preparing = false;
+
+    app.changed();
+    assert!(
+        app.has_background_work(),
+        "a comparison is about to be prepared"
+    );
+    app.prepared_revision = app.revision;
+
+    let recording = RecordingId::new();
+    app.video_sync.recording_mut(recording).alignment_job = Some(3);
+    assert!(app.has_background_work());
+    app.video_sync.recording_mut(recording).alignment_job = None;
+    assert!(!app.has_background_work());
+}
+
+#[test]
+fn first_import_chooses_a_layout_once_and_respects_explicit_choices() {
+    let has_video_panel = |app: &AnalysisApp| {
+        app.dock
+            .iter_all_tabs()
+            .any(|(_, tab)| matches!(tab.kind, TabKind::Video(_)))
+    };
+    for with_video in [false, true] {
+        let mut app = AnalysisApp::new();
+        let (mut recording, _) = recording("first", source("data", SourceId::new()), "lap");
+        if with_video {
+            recording.video_path = Some("video.mp4".into());
+        }
+        app.workspace.recordings.push(recording);
+        app.finish_initial_layout();
+        assert_eq!(has_video_panel(&app), with_video);
+        app.workspace.recordings[0].video_path = Some("later.mp4".into());
+        app.finish_initial_layout();
+        assert_eq!(
+            has_video_panel(&app),
+            with_video,
+            "later imports preserve the dock"
+        );
+    }
+    let mut app = AnalysisApp::new();
+    app.layout_preset(2);
+    let (recording, _) = recording("first", source("data", SourceId::new()), "lap");
+    app.workspace.recordings.push(recording);
+    app.finish_initial_layout();
+    assert!(
+        has_video_panel(&app),
+        "an explicit layout survives a data-only import"
+    );
+}
+
+#[test]
+fn changing_trace_colors_refreshes_draw_caches_without_repreparing_telemetry() {
+    let mut app = AnalysisApp::new();
+    let revision = app.prepared_revision;
+    app.plot_cache.insert("plot".into(), Arc::new(vec![]));
+    app.scatter_cache.insert("scatter".into(), Arc::new(vec![]));
+    app.map_cache.insert("map".into(), vec![]);
+    let mut changed = app.trace_palette;
+    changed[0] = egui::Color32::RED;
+    app.refresh_trace_palette(changed);
+    assert!(app.plot_cache.is_empty() && app.scatter_cache.is_empty() && app.map_cache.is_empty());
+    assert_eq!(app.prepared_revision, revision);
+    app.plot_cache.insert("same".into(), Arc::new(vec![]));
+    app.refresh_trace_palette(changed);
+    assert!(
+        app.plot_cache.contains_key("same"),
+        "no invalidation when the palette is unchanged"
+    );
+}
+
+#[test]
+fn compact_video_header_keeps_the_link_and_controls_on_one_visible_line() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    for width in [250.0, 420.0] {
+        let mut app = AnalysisApp::new();
+        let source_id = SourceId::new();
+        let (mut recording, key) = recording(
+            "Long recording name",
+            source("data", source_id),
+            "A very long lap name that must yield room to controls",
+        );
+        recording.video_path = Some("synthetic.insv".into());
+        recording.video_processing = Some(Default::default());
+        app.workspace.recordings.push(recording);
+        app.state.selection = vec![key];
+        app.data.insert(
+            source_id,
+            SourceData::from_dataset(Arc::new(TelemetryDataset {
+                source_id,
+                ..Default::default()
+            })),
+        );
+        app.prepared = prepare_comparison(&app.workspace, &app.state.selection, &app.data);
+        let mut options = VideoOptions {
+            slot: 0,
+            segment: None,
+            linked: true,
+            time: 0.0,
+            unknown: Default::default(),
+        };
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(width, 220.0))
+            .build_ui(|ui| app.video(ui, 1, &mut options, None));
+        harness.run_steps(3);
+        let linked = harness.get_by_label("Linked").rect();
+        let controls = harness.get_by_label("Video ⏷").rect();
+        assert!((linked.center().y - controls.center().y).abs() < 2.0);
+        assert!(
+            controls.right() <= width,
+            "controls were clipped at {width} points"
+        );
+        assert!(controls.height() < 32.0 && controls.width() > 40.0);
+        harness.get_by_label("Video ⏷").click();
+        harness.run_steps(3);
+        assert!(harness.query_by_label("Stabilize").is_some());
+    }
+}
+
+#[test]
+fn clicking_anywhere_on_a_recording_card_selects_it() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = AnalysisApp::new();
+    let (first, _) = recording("first", source("first", SourceId::new()), "run");
+    let (mut second, _) = recording("second", source("second", SourceId::new()), "run");
+    second.segments[0].end_recording_time = 7.0;
+    let second_id = second.id;
+    app.workspace.recordings = vec![first, second];
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(420.0, 600.0))
+        .build_ui_state(|ui, app: &mut AnalysisApp| app.browser(ui, None), app);
+    harness.run_steps(3);
+
+    harness.get_by_label_contains("7.000").click();
+    harness.run_steps(3);
+
+    assert_eq!(harness.state().state.selected_recording, Some(second_id));
 }

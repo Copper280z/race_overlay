@@ -1,60 +1,60 @@
 //! Toolbar and export dialog controls.
 use super::super::ExportCodecChoice;
-use super::super::policy::{codec_display_name, unit_system_label};
+use super::super::policy::codec_display_name;
 use super::{OverlayEditor, PanelAction};
+use crate::ui_kit::widgets;
 use eframe::egui;
-use overlay_core::UnitSystem;
 use overlay_media::ExportSettings;
 
 impl OverlayEditor {
-    pub(in crate::race_app) fn top_bar(&mut self, ui: &mut egui::Ui) {
+    /// Left-hand commands, drawn inside the application header.
+    pub(in crate::race_app) fn header_left(&mut self, ui: &mut egui::Ui) {
         let view = self.toolbar_view();
-        ui.horizontal(|ui| {
-            if ui.button("Open video").clicked() {
-                self.open_video();
-            }
-            if ui.button("Open project").clicked() {
+        if ui.button("Open video…").clicked() {
+            self.open_video();
+        }
+        widgets::action_menu(ui, "Project ⏷", |ui| {
+            if widgets::menu_item(ui, "Open project…", None) {
                 self.open_project();
-            }
-            let previous_units = view.unit_system;
-            let mut selected_units = view.unit_system;
-            egui::ComboBox::from_id_salt("default-unit-system")
-                .selected_text(unit_system_label(view.unit_system))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut selected_units, UnitSystem::Metric, "Metric");
-                    ui.selectable_value(&mut selected_units, UnitSystem::Imperial, "Imperial");
-                });
-            if selected_units != previous_units {
-                self.apply_panel_action(PanelAction::SetUnitSystem(selected_units));
+                ui.close();
             }
             ui.add_enabled_ui(view.has_project, |ui| {
-                if ui.selectable_label(!view.show_data_plot, "Video").clicked() {
-                    self.apply_panel_action(PanelAction::SetPlotVisible(false));
-                }
-                if ui
-                    .selectable_label(view.show_data_plot, "Data graph")
-                    .clicked()
-                {
-                    self.apply_panel_action(PanelAction::SetPlotVisible(true));
-                }
-                if ui.button("Save").clicked() {
+                if widgets::menu_item(ui, "Save", None) {
                     self.save_project(false);
+                    ui.close();
                 }
-                if ui.button("Save as…").clicked() {
+                if widgets::menu_item(ui, "Save as…", None) {
                     self.save_project(true);
-                }
-                if ui.button("Export MP4…").clicked() {
-                    self.apply_panel_action(PanelAction::OpenExportDialog);
+                    ui.close();
                 }
             });
-            if let Some(cancel) = &self.export_controller.export_cancel {
-                ui.add(
-                    egui::ProgressBar::new(self.export_controller.export_fraction)
-                        .desired_width(120.0),
-                );
-                if ui.button("Cancel export").clicked() {
-                    cancel.cancel();
-                }
+        });
+        ui.separator();
+        ui.add_enabled_ui(view.has_project, |ui| {
+            let mut plot = view.show_data_plot;
+            if widgets::segmented(
+                ui,
+                &mut plot,
+                &[
+                    (false, "Video", "Preview the video with the overlay"),
+                    (
+                        true,
+                        "Data graph",
+                        "Inspect the imported telemetry around the playhead",
+                    ),
+                ],
+            ) {
+                self.apply_panel_action(PanelAction::SetPlotVisible(plot));
+            }
+        });
+    }
+
+    /// Right-hand controls, drawn inside the application header.
+    pub(in crate::race_app) fn header_right(&mut self, ui: &mut egui::Ui) {
+        let has_project = self.toolbar_view().has_project;
+        ui.add_enabled_ui(has_project && !self.export_running(), |ui| {
+            if widgets::primary_button(ui, "Export MP4…").clicked() {
+                self.apply_panel_action(PanelAction::OpenExportDialog);
             }
         });
     }
@@ -74,7 +74,7 @@ impl OverlayEditor {
             .resizable(false)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.heading("Source video");
+                widgets::section_label(ui, "Source video");
                 let codec = metadata
                     .codec
                     .as_deref()
@@ -92,8 +92,8 @@ impl OverlayEditor {
                     "{codec} • {}×{} • {fps} • {rate}",
                     metadata.width, metadata.height
                 ));
-                ui.add_space(8.0);
-                ui.heading("Video codec");
+                ui.add_space(4.0);
+                widgets::section_label(ui, "Video codec");
                 for choice in [
                     ExportCodecChoice::MatchSource,
                     ExportCodecChoice::H264,
@@ -101,7 +101,7 @@ impl OverlayEditor {
                 ] {
                     ui.radio_value(&mut self.export_controller.export_codec, choice, choice.label());
                 }
-                ui.small(match self.export_controller.export_codec {
+                widgets::hint(ui, match self.export_controller.export_codec {
                     ExportCodecChoice::MatchSource => {
                         "Uses the source codec family and Apple-compatible MP4 tagging."
                     }
@@ -112,8 +112,8 @@ impl OverlayEditor {
                         "Efficient for 4K; requires HEVC-capable playback hardware/software."
                     }
                 });
-                ui.add_space(8.0);
-                ui.heading("Quality");
+                ui.add_space(4.0);
+                widgets::section_label(ui, "Quality");
                 ui.checkbox(&mut self.export_controller.export_match_bitrate, "Match source bitrate");
                 ui.add_enabled_ui(!self.export_controller.export_match_bitrate, |ui| {
                     ui.add(
@@ -130,7 +130,7 @@ impl OverlayEditor {
                 };
                 if let (Some(rate), Some(duration)) = (selected_rate, metadata.duration) {
                     let estimated_mb = rate * duration / 8.0;
-                    ui.small(format!(
+                    widgets::hint(ui, format!(
                         "Approximate video size: {:.0} MB (audio adds a small amount)",
                         estimated_mb
                     ));
@@ -150,9 +150,10 @@ impl OverlayEditor {
                     );
                 });
                 ui.separator();
-                ui.small("Resolution, frame rate, color metadata, and source audio are preserved. Hardware encoding is preferred when available.");
+                widgets::hint(ui, "Resolution, frame rate, color metadata, and source audio are preserved. Hardware encoding is preferred when available.");
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Choose file and export…").clicked() {
+                    if widgets::primary_button(ui, "Choose file and export…").clicked() {
                         start_export = true;
                     }
                     if ui.button("Cancel").clicked() {

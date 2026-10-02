@@ -1,10 +1,12 @@
 use crate::analysis_imagery::{GeoBounds, ImageryConfig, ImageryController};
+use crate::ui_kit::{Tone, widgets};
 use egui::{Color32, Pos2};
 use overlay_core::{
     GpsPoint, Interpolation, ProgressSample, ReferenceCourse, SegmentRef, TimedSample, Unit,
     progress_at_time, time_at_progress,
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::path::Path;
 
 pub struct MapTrace {
@@ -17,6 +19,8 @@ pub struct MapTrace {
     pub interpolation: Interpolation,
     pub gap_seconds: Option<f64>,
     pub cursor_time: Option<f64>,
+    /// True for the pinned comparison reference run.
+    pub is_reference: bool,
 }
 pub struct MapSelection {
     pub segment: SegmentRef,
@@ -75,14 +79,14 @@ impl Default for MapPanel {
     }
 }
 
-fn bounds(traces: &[MapTrace]) -> Option<GeoBounds> {
+fn bounds<T: Borrow<MapTrace>>(traces: &[T]) -> Option<GeoBounds> {
     let mut b = GeoBounds {
         west: f64::INFINITY,
         east: f64::NEG_INFINITY,
         south: f64::INFINITY,
         north: f64::NEG_INFINITY,
     };
-    for p in traces.iter().flat_map(|t| &t.gps) {
+    for p in traces.iter().flat_map(|t| &t.borrow().gps) {
         b.west = b.west.min(p.longitude);
         b.east = b.east.max(p.longitude);
         b.south = b.south.min(p.latitude);
@@ -191,10 +195,10 @@ fn zoom_about_cursor(
     *zoom = new_zoom;
 }
 
-fn automatic_color_range(traces: &[MapTrace]) -> Option<[f64; 2]> {
+fn automatic_color_range<T: Borrow<MapTrace>>(traces: &[T]) -> Option<[f64; 2]> {
     let mut range = traces
         .iter()
-        .flat_map(|trace| &trace.values)
+        .flat_map(|trace| &trace.borrow().values)
         .filter(|sample| sample.value.is_finite())
         .fold([f64::INFINITY, f64::NEG_INFINITY], |range, sample| {
             [range[0].min(sample.value), range[1].max(sample.value)]
@@ -234,6 +238,20 @@ fn lane_offsets(index: usize, count: usize, total_width: f32) -> (f32, f32, f32)
     let outer = total_width / 2.0 - lane_width * index as f32;
     let inner = outer - lane_width;
     (outer, inner, (outer + inner) / 2.0)
+}
+
+/// Column count that lets the most map fit in each cell of a grid of `count`
+/// maps with the given width / height `aspect`, inside `size`.
+fn grid_columns(count: usize, size: egui::Vec2, aspect: f32) -> usize {
+    (1..=count.max(1))
+        .max_by(|a, b| {
+            let fit = |columns: usize| {
+                let rows = count.div_ceil(columns);
+                (size.x / columns as f32 / aspect).min(size.y / rows as f32)
+            };
+            fit(*a).total_cmp(&fit(*b))
+        })
+        .unwrap_or(1)
 }
 
 fn paint_color_scale(
@@ -292,29 +310,148 @@ fn paint_color_scale(
     );
 }
 
-fn paint_run_legend(painter: &egui::Painter, map_rect: egui::Rect, traces: &[MapTrace]) {
-    let visible = traces
-        .len()
-        .min(((map_rect.height() - 16.0) / 17.0).max(1.0) as usize);
-    let rect = egui::Rect::from_min_size(
-        map_rect.left_top() + egui::vec2(8.0, 8.0),
-        egui::vec2(
-            (map_rect.width() * 0.45).clamp(150.0, 360.0),
-            visible as f32 * 17.0 + 8.0,
-        ),
+/// Traces recorded near the reference run (or the first run with GPS).
+/// Runs from another venue cannot share a map with it, and fitting one map to
+/// both would shrink every run to a dot.
+fn venue_traces(traces: &[MapTrace]) -> Vec<&MapTrace> {
+    let center = |trace: &MapTrace| {
+        bounds(std::slice::from_ref(trace))
+            .map(|b| ((b.north + b.south) / 2.0, (b.east + b.west) / 2.0))
+    };
+    let anchor = traces
+        .iter()
+        .filter(|trace| !trace.gps.is_empty())
+        .find(|trace| trace.is_reference)
+        .or_else(|| traces.iter().find(|trace| !trace.gps.is_empty()))
+        .and_then(center);
+    let Some((anchor_lat, anchor_lon)) = anchor else {
+        return traces.iter().collect();
+    };
+    // About 5 km: enough for one circuit or autocross site, not for two.
+    let near = |(lat, lon): (f64, f64)| {
+        (lat - anchor_lat).abs() < 0.05
+            && (lon - anchor_lon).abs() * anchor_lat.to_radians().cos() < 0.05
+    };
+    traces
+        .iter()
+        .filter(|trace| center(trace).is_none_or(near))
+        .collect()
+}
+
+fn paint_run_legend(painter: &egui::Painter, map_rect: egui::Rect, traces: &[&MapTrace]) {
+    let entries = traces
+        .iter()
+        .map(|trace| (trace.name.clone(), trace.color))
+        .collect::<Vec<_>>();
+    paint_legend(painter, map_rect, &entries);
+}
+
+/// Run legend in the bottom-left, clear of the color scale in the top-right.
+fn paint_legend(painter: &egui::Painter, map_rect: egui::Rect, entries: &[(String, Color32)]) {
+    let capacity = ((map_rect.height() - 70.0) / 17.0).max(1.0) as usize;
+    let visible = entries.len().min(capacity.min(8));
+    let hidden = entries.len() - visible;
+    let lines = visible + usize::from(hidden > 0);
+    let size = egui::vec2(
+        (map_rect.width() * 0.7).clamp(150.0, 340.0),
+        lines as f32 * 17.0 + 8.0,
     );
-    painter.rect_filled(rect, 4.0, Color32::from_black_alpha(190));
-    for (index, trace) in traces.iter().take(visible).enumerate() {
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(map_rect.left() + 8.0, map_rect.bottom() - size.y - 8.0),
+        size,
+    );
+    painter.rect_filled(rect, 4.0, Color32::from_black_alpha(170));
+    for (index, (name, color)) in entries.iter().take(visible).enumerate() {
+        let top = rect.top() + 4.0 + index as f32 * 17.0;
+        painter.circle_filled(egui::pos2(rect.left() + 12.0, top + 7.0), 3.5, *color);
         painter.text(
-            rect.left_top() + egui::vec2(7.0, 4.0 + index as f32 * 17.0),
+            egui::pos2(rect.left() + 21.0, top),
             egui::Align2::LEFT_TOP,
-            format!("● {}", trace.name),
+            name,
             egui::FontId::proportional(11.0),
-            trace.color,
+            *color,
+        );
+    }
+    if hidden > 0 {
+        painter.text(
+            egui::pos2(rect.left() + 21.0, rect.top() + 4.0 + visible as f32 * 17.0),
+            egui::Align2::LEFT_TOP,
+            format!("+{hidden} more"),
+            egui::FontId::proportional(11.0),
+            Color32::from_gray(170),
         );
     }
 }
 impl MapPanel {
+    /// Layout, color-range, and imagery options for the popover in the map header.
+    pub fn options_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        traces: &[MapTrace],
+        config: &mut MapSettings,
+        asset_dir: &Path,
+    ) {
+        let geographic_bounds = bounds(&venue_traces(traces));
+        widgets::section_label(ui, "Layout");
+        ui.checkbox(
+            &mut config.small_multiples,
+            if config.actual_gps {
+                "Side by side"
+            } else {
+                "Split ribbon"
+            },
+        )
+        .on_hover_text(if config.actual_gps {
+            "Give every run its own GPS map"
+        } else {
+            "Split one course ribbon lengthwise, left to right in the comparison order"
+        });
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::DragValue::new(&mut config.rotation_degrees)
+                    .speed(0.5)
+                    .suffix("° rotation"),
+            );
+            if ui.button("Fit to view").clicked() {
+                self.zoom = 1.0;
+                self.pan = egui::Vec2::ZERO;
+            }
+        });
+        if config.color_mode == MapColorMode::Value {
+            widgets::section_label(ui, "Color range");
+            let automatic_range = automatic_color_range(traces).unwrap_or([0.0, 1.0]);
+            let mut automatic = config.manual_scale.is_none();
+            if ui
+                .checkbox(&mut automatic, "Automatic")
+                .on_hover_text("Use the minimum and maximum across every displayed run")
+                .changed()
+            {
+                config.manual_scale = (!automatic).then_some(automatic_range);
+            }
+            if let Some(range) = config.manual_scale.as_mut() {
+                let speed = ((range[1] - range[0]).abs() / 200.0).max(0.01);
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut range[0])
+                            .speed(speed)
+                            .prefix("Min "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut range[1])
+                            .speed(speed)
+                            .prefix("Max "),
+                    );
+                });
+                if !range.iter().all(|value| value.is_finite()) || range[1] <= range[0] {
+                    widgets::callout(ui, Tone::Bad, "Maximum must exceed minimum");
+                }
+            }
+        }
+        if config.actual_gps {
+            self.imagery
+                .ui(ui, &mut config.imagery, geographic_bounds, asset_dir);
+        }
+    }
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -324,65 +461,41 @@ impl MapPanel {
         config: &mut MapSettings,
         asset_dir: &Path,
     ) -> Option<MapSelection> {
+        let visible = if config.actual_gps {
+            venue_traces(traces)
+        } else {
+            traces.iter().collect()
+        };
+        let hidden = traces.len() - visible.len();
+        let traces: &[&MapTrace] = &visible;
         let geographic_bounds = bounds(traces);
-        if config.controls_expanded {
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(
-                    &mut config.small_multiples,
-                    if config.actual_gps {
-                        "Side by side"
-                    } else {
-                        "Split ribbon"
-                    },
-                )
-                .on_hover_text(if config.actual_gps {
-                    "Give every run its own GPS map"
-                } else {
-                    "Split one course ribbon lengthwise, left to right in the comparison order"
+        if config.actual_gps {
+            // Load the saved image whether or not the options menu is open.
+            self.imagery.poll(ui.ctx(), &mut config.imagery);
+            if config.imagery.image_path.is_none() && !traces.is_empty() {
+                widgets::card(ui, false, |ui| {
+                    widgets::hint(
+                        ui,
+                        "Add a background image of the track to see the runs in context.",
+                    );
+                    self.imagery.quick_actions(
+                        ui,
+                        &mut config.imagery,
+                        geographic_bounds,
+                        asset_dir,
+                        false,
+                    );
                 });
-                ui.add(
-                    egui::DragValue::new(&mut config.rotation_degrees)
-                        .speed(0.5)
-                        .suffix("° rotation"),
-                );
-                if ui.button("Fit").clicked() {
-                    self.zoom = 1.0;
-                    self.pan = egui::Vec2::ZERO;
-                }
-                if config.color_mode == MapColorMode::Value {
-                    ui.separator();
-                    ui.label("Color range");
-                    let automatic_range = automatic_color_range(traces).unwrap_or([0.0, 1.0]);
-                    let mut automatic = config.manual_scale.is_none();
-                    if ui
-                        .checkbox(&mut automatic, "Auto")
-                        .on_hover_text("Use the minimum and maximum across every displayed run")
-                        .changed()
-                    {
-                        config.manual_scale = (!automatic).then_some(automatic_range);
-                    }
-                    if let Some(range) = config.manual_scale.as_mut() {
-                        let speed = ((range[1] - range[0]).abs() / 200.0).max(0.01);
-                        ui.add(
-                            egui::DragValue::new(&mut range[0])
-                                .speed(speed)
-                                .prefix("Min "),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut range[1])
-                                .speed(speed)
-                                .prefix("Max "),
-                        );
-                        if !range.iter().all(|value| value.is_finite()) || range[1] <= range[0] {
-                            ui.colored_label(Color32::LIGHT_RED, "Maximum must exceed minimum");
-                        }
-                    }
-                }
-            });
-            if config.actual_gps {
-                self.imagery
-                    .ui(ui, &mut config.imagery, geographic_bounds, asset_dir);
+                ui.add_space(4.0);
             }
+        }
+        if hidden > 0 {
+            widgets::hint(
+                ui,
+                format!(
+                    "{hidden} selected run(s) were recorded at another location and are hidden here."
+                ),
+            );
         }
         if traces.is_empty() {
             ui.label("Select laps or runs to display their GPS paths.");
@@ -411,13 +524,14 @@ impl MapPanel {
         } else {
             1
         };
-        let columns = if groups > 1 { 2 } else { 1 };
-        let rows = groups.div_ceil(columns);
         let full = ui.available_rect_before_wrap();
-        let cell = egui::vec2(
-            full.width() / columns as f32,
-            (full.height() / rows as f32).max(120.0),
-        );
+        let aspect = ((b.east - b.west) * ((b.north + b.south) / 2.0).to_radians().cos()
+            / (b.north - b.south).max(1e-9))
+        .abs()
+        .clamp(0.2, 5.0) as f32;
+        let columns = grid_columns(groups, full.size(), aspect);
+        let rows = groups.div_ceil(columns);
+        let cell = egui::vec2(full.width() / columns as f32, full.height() / rows as f32);
         let mut selection = None;
         let center_lat = (b.north + b.south) / 2.0;
         let center_lon = (b.west + b.east) / 2.0;
@@ -512,7 +626,7 @@ impl MapPanel {
             if config.actual_gps {
                 self.imagery.paint(&painter, &config.imagery, project);
             }
-            let selected: &[MapTrace] = if config.actual_gps && config.small_multiples {
+            let selected: &[&MapTrace] = if config.actual_gps && config.small_multiples {
                 &traces[group..group + 1]
             } else {
                 traces
@@ -608,20 +722,21 @@ impl MapPanel {
                             egui::Stroke::new(1.5, Color32::WHITE),
                         );
                     }
-                    let side = match (lane, count) {
-                        (0, 2) => "left",
-                        (1, 2) => "right",
-                        _ if count > 1 => "left to right",
-                        _ => "full ribbon",
-                    };
-                    painter.text(
-                        rect.left_top() + egui::vec2(6.0, 5.0 + lane as f32 * 17.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("{} · {side}", trace.name),
-                        egui::FontId::proportional(13.0),
-                        trace.color,
-                    );
                 }
+                let entries = selected
+                    .iter()
+                    .enumerate()
+                    .map(|(lane, trace)| {
+                        let side = match (lane, count) {
+                            (0, 2) => "left",
+                            (1, 2) => "right",
+                            _ if count > 1 => "left to right",
+                            _ => "full ribbon",
+                        };
+                        (format!("{} · {side}", trace.name), trace.color)
+                    })
+                    .collect::<Vec<_>>();
+                paint_legend(&painter, rect, &entries);
                 if response.clicked()
                     && let Some((_, lane, time)) = nearest.filter(|v| v.0 < 900.0)
                 {
@@ -722,6 +837,15 @@ impl MapPanel {
                 paint_run_legend(&painter, rect, traces);
             }
         }
+        if config.actual_gps && self.imagery.is_loading() {
+            ui.painter().text(
+                full.right_top() + egui::vec2(-12.0, 10.0),
+                egui::Align2::RIGHT_TOP,
+                "Loading imagery…",
+                egui::FontId::proportional(12.0),
+                Color32::from_gray(200),
+            );
+        }
         ui.allocate_rect(full, egui::Sense::hover());
         selection
     }
@@ -730,6 +854,15 @@ impl MapPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_fits_many_maps_without_a_fixed_column_count() {
+        // A tall narrow panel stacks maps; a wide one lays them out in a row.
+        assert_eq!(grid_columns(3, egui::vec2(200.0, 900.0), 1.0), 1);
+        assert_eq!(grid_columns(3, egui::vec2(900.0, 200.0), 1.0), 3);
+        assert_eq!(grid_columns(1, egui::vec2(300.0, 300.0), 1.0), 1);
+        assert_eq!(grid_columns(0, egui::vec2(300.0, 300.0), 1.0), 1);
+    }
 
     #[test]
     fn two_ribbon_lanes_split_at_center_in_comparison_order() {
@@ -764,6 +897,7 @@ mod tests {
             interpolation: Interpolation::Linear,
             gap_seconds: None,
             cursor_time: None,
+            is_reference: false,
         };
         assert_eq!(automatic_color_range(&[trace]), Some([19.0, 21.0]));
     }

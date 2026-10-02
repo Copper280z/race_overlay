@@ -1,43 +1,56 @@
 //! Telemetry plot preparation and rendering controls.
 use super::OverlayEditor;
-use eframe::egui;
+use crate::ui_kit::{theme::text, widgets};
+use eframe::egui::{self, RichText};
 use overlay_core::{Unit, zero_phase_low_pass};
 
 impl OverlayEditor {
     pub(in crate::race_app) fn data_plot_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.heading("Telemetry graph");
+            ui.label(
+                RichText::new("Telemetry graph")
+                    .strong()
+                    .size(15.0)
+                    .color(text::strong()),
+            );
             ui.add(
                 egui::Slider::new(&mut self.plot_editor.plot_window_seconds, 1.0..=120.0)
                     .logarithmic(true)
-                    .text("Window s"),
+                    .text("Window")
+                    .suffix(" s"),
             );
-            ui.checkbox(
-                &mut self.plot_editor.plot_filter_enabled,
-                "Preview low-pass",
-            );
-            ui.add_enabled(
-                self.plot_editor.plot_filter_enabled,
-                egui::Slider::new(&mut self.plot_editor.plot_filter_hz, 0.5..=50.0)
-                    .logarithmic(true)
-                    .text("Hz"),
-            );
-            ui.checkbox(
-                &mut self.plot_editor.plot_robust_scale,
-                "Ignore extreme 1% for scale",
-            );
+            ui.checkbox(&mut self.plot_editor.plot_filter_enabled, "Smooth")
+                .on_hover_text(
+                    "Zero-phase, non-causal preview smoothing. It does not modify source data or widgets; the cutoff is the final two-pass -3 dB point.",
+                );
+            if self.plot_editor.plot_filter_enabled {
+                ui.add(
+                    egui::Slider::new(&mut self.plot_editor.plot_filter_hz, 0.5..=50.0)
+                        .logarithmic(true)
+                        .suffix(" Hz"),
+                );
+            }
+            ui.checkbox(&mut self.plot_editor.plot_robust_scale, "Ignore extremes")
+                .on_hover_text("Ignore the most extreme 1% of values when scaling the vertical axis");
         });
-        ui.small("Zero-phase, non-causal preview only; it does not modify source data or widgets. The displayed cutoff is the final two-pass -3 dB point.");
         let mut time = self.session.current_time();
-        if ui
-            .add(egui::Slider::new(&mut time, 0.0..=self.duration()).text("Video time"))
-            .changed()
-        {
-            self.session.set_current_time(time);
-            self.stop_playback();
-            self.request_preview();
-            self.refresh_overlay();
-        }
+        ui.horizontal(|ui| {
+            ui.monospace(format!(
+                "{} / {}",
+                widgets::clock(time),
+                widgets::clock(self.duration())
+            ));
+            ui.spacing_mut().slider_width = ui.available_width() - 12.0;
+            if ui
+                .add(egui::Slider::new(&mut time, 0.0..=self.duration()).show_value(false))
+                .changed()
+            {
+                self.session.set_current_time(time);
+                self.stop_playback();
+                self.request_preview();
+                self.refresh_overlay();
+            }
+        });
         let half = self.plot_editor.plot_window_seconds * 0.5;
         let start = (self.session.current_time() - half).max(0.0);
         let end = (start + self.plot_editor.plot_window_seconds).min(self.duration());
@@ -103,9 +116,12 @@ impl OverlayEditor {
             ));
         }
         if plotted.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label("Select one or more channels under Data sources → Plot channels.");
-            });
+            widgets::empty_state(
+                ui,
+                "No channels to plot",
+                "Tick channels under Data sources, Plot channels on the left.",
+                |_| {},
+            );
             return;
         }
         let colors = [
@@ -218,7 +234,7 @@ impl OverlayEditor {
                 egui::pos2(playhead, rect.top()),
                 egui::pos2(playhead, rect.bottom()),
             ],
-            egui::Stroke::new(2.0, egui::Color32::WHITE),
+            egui::Stroke::new(2.0, text::strong()),
         );
     }
 }

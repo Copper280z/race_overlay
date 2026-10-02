@@ -38,12 +38,28 @@ subject to the live-preview release gate described in `docs/raw-video.md`.
   - `analysis_app.rs`: Analysis composition, navigation, and shared view queries.
   - `analysis_model.rs`: serializable tabs/options and view-runtime models.
   - `analysis_io.rs`: imports, background work, and media attachment coordination.
-  - `analysis_views.rs`, `analysis_workflow.rs`: plots, setup, and workspace actions.
+  - `analysis_views.rs`, `analysis_workflow.rs`: plots, maps, video, and
+    statistics panels; workspace open/save and gate actions.
+  - `analysis_chrome.rs`: Analysis toolbar, transport bar, and first-run state.
+  - `analysis_setup/`: the "Timing & course setup" panel, one module per tab
+    (intervals, sources and sync, course gates).
   - `analysis_recordings.rs`: recording rows and the actions they emit.
   - `analysis_sync/`: recording-scoped audio sync, camera calibration,
-    logger/camera correlation, persistence compatibility, and presentation.
+    logger/camera correlation, log/video pairing, persistence compatibility,
+    and presentation.
+  - `analysis_decimate.rs`: reduces plot lines to screen resolution per view.
+    Prepared series stay complete; only what egui draws is reduced.
   - `analysis_maps.rs`, `analysis_imagery.rs`: map interaction and registration.
-  - `race_app.rs`: thin Overlay application root.
+  - `ui_kit/`: the shared theme and small widgets (segmented control, cards,
+    chips, popovers). Panels take colors from `theme::surface`, `theme::text`,
+    `theme::accent()`, and `Tone`, never from literals. A color scheme is one
+    `Palette` in `ui_kit/theme/themes/`: copy `race_dark.rs`, register it in
+    `themes/mod.rs`, and the contrast tests in `theme/mod.rs` check it.
+  - `native_menu/`: the macOS menu bar (`muda`); an inert stand-in elsewhere so
+    the shell has no platform conditionals. Do not add a native Edit menu: its
+    Cut/Copy/Paste shortcuts would keep egui text fields from receiving them.
+  - `race_app.rs`: application shell (header, status bar, shortcuts) and the
+    Overlay root.
   - `race_app/`: Overlay controllers, lifecycle, policy, panels, preview, export,
     and tests. Put pure decisions in `*_policy.rs`; keep I/O in the owning
     controller/module.
@@ -73,6 +89,18 @@ dumping-ground utility module.
   network access, or FFmpeg should remain explicit and ignored by default.
 - Add regression tests near the owning module. Test pure policy independently
   from UI rendering or external processes when possible.
+- Visual changes can be reviewed offscreen: the ignored `render_ui_snapshots`
+  test writes PNGs of the real UI (see `app/src/race_app/snapshots.rs`). It
+  needs a GPU adapter and the local `mychron_data` recordings, so it is opt-in.
+  The bundled fonts lack some symbols (for example `▾ ● ✓ ← →`); prefer the
+  glyphs `render_glyph_coverage` shows are drawable, or paint the shape.
+- `widgets::popover` is self-managed on purpose. egui allows one open popup
+  per window, so a dropdown inside an egui menu closes the menu; use `popover`
+  (and `close_popover`) for panels that contain dropdowns.
+- An idle window must not repaint. Workers hand results over channels without
+  waking the UI, so a panel asks for `request_repaint_after` only while it has
+  something outstanding (`AnalysisApp::has_background_work`, a pending video
+  frame); never from a constant loop.
 - Update `docs/usage.md` for visible behavior and `README.md` for setup or scope.
 - Do not commit `target/`, recordings, videos, exports, or local project files.
 - Before publication, run:

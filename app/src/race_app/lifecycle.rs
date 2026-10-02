@@ -279,6 +279,23 @@ impl OverlayEditor {
         }
     }
 
+    /// A project with the default dashboard and synthetic telemetry, without
+    /// requiring FFmpeg or a real video. Used by the visual snapshot tests.
+    #[cfg(test)]
+    pub(in crate::race_app) fn load_sample_for_test(&mut self) {
+        let mut project = ProjectV1::new("sample-onboard.mp4");
+        project.appearance = appearance_for_preset("race_dark");
+        project.widgets = default_widgets_for(self.unit_system());
+        self.session.set_project(project.into());
+        self.session
+            .set_project_path(Some("sample.race-overlay.json".into()));
+        self.widget_editor.selected_widget = self
+            .project()
+            .and_then(|project| project.widgets.first().map(|widget| widget.id));
+        self.add_synthetic();
+        self.refresh_overlay();
+    }
+
     pub(super) fn open_project(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Race Overlay project", &["json"])

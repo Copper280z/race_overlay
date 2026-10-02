@@ -2,39 +2,37 @@
 
 use super::*;
 
-pub fn gate_window(
+/// Laps between consecutive directed crossings of one circuit gate, as
+/// (start, finish) recording times.
+pub fn gate_laps(gps: &[GpsPoint], gate: Gate) -> Vec<(f64, f64)> {
+    gate_crossings(gps, gate)
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect()
+}
+
+/// When a run first crosses the start gate inside `[start, end]`, and when it
+/// next crosses the finish gate (the circuit gate again, with one gate).
+pub(super) fn run_gate_times(
     gps: &[GpsPoint],
     gates: &[Gate],
-    interval_start: f64,
-    interval_end: f64,
-) -> Option<(f64, f64)> {
-    let starts = gate_crossings(gps, *gates.first()?);
-    let pairs = if gates.len() == 1 {
-        starts
-            .windows(2)
-            .map(|pair| (pair[0], pair[1]))
-            .collect::<Vec<_>>()
-    } else {
-        let finishes = gate_crossings(gps, gates[1]);
-        starts
-            .into_iter()
-            .filter_map(|start| {
-                finishes
-                    .iter()
-                    .copied()
-                    .find(|finish| *finish > start + 1.0)
-                    .map(|finish| (start, finish))
-            })
-            .collect()
+    start: f64,
+    end: f64,
+) -> (Option<f64>, Option<f64>) {
+    let inside = |time: f64| time >= start - 1e-6 && time <= end + 1e-6;
+    let Some(start_gate) = gates.first() else {
+        return (None, None);
     };
-    pairs
+    let Some(started) = gate_crossings(gps, *start_gate)
         .into_iter()
-        .filter_map(|pair| {
-            let overlap = (pair.1.min(interval_end) - pair.0.max(interval_start)).max(0.0);
-            (overlap > 0.0).then_some((overlap, pair))
-        })
-        .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, pair)| pair)
+        .find(|time| inside(*time))
+    else {
+        return (None, None);
+    };
+    let finished = gate_crossings(gps, *gates.get(1).unwrap_or(start_gate))
+        .into_iter()
+        .find(|time| *time > started + 1.0 && inside(*time));
+    (Some(started), finished)
 }
 pub fn segment<'a>(
     workspace: &'a AnalysisWorkspace,
@@ -161,7 +159,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gate_window_uses_directed_start_and_finish_crossings() {
+    fn run_gate_times_use_directed_start_and_finish_crossings_inside_the_run() {
         let points = [-0.001, 0.001, 0.0015, 0.0025]
             .into_iter()
             .enumerate()
@@ -178,11 +176,16 @@ mod tests {
             heading_degrees: 0.0,
             width_meters: 20.0,
         };
+        let gates = [gate(0.0), gate(0.002)];
 
-        let window = gate_window(&points, &[gate(0.0), gate(0.002)], 0.0, 3.0).unwrap();
+        let (start, finish) = run_gate_times(&points, &gates, 0.0, 3.0);
+        assert!((start.unwrap() - 0.5).abs() < 1e-9);
+        assert!((finish.unwrap() - 2.5).abs() < 1e-9);
 
-        assert!((window.0 - 0.5).abs() < 1e-9);
-        assert!((window.1 - 2.5).abs() < 1e-9);
+        assert_eq!(run_gate_times(&points, &gates, 1.0, 3.0), (None, None));
+        let (start, finish) = run_gate_times(&points, &gates, 0.0, 2.0);
+        assert!(start.is_some());
+        assert_eq!(finish, None);
     }
 
     #[test]

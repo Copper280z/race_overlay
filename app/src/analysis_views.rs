@@ -1,7 +1,24 @@
 use super::*;
-use crate::analysis_maps::{color_map, sample_value};
-use egui_plot::{Legend, Line, Plot, Points, VLine};
+use crate::analysis_maps::{MapColorMode, MapTrace, color_map};
+use crate::ui_kit::{
+    Tone,
+    theme::{self, text},
+    widgets,
+};
+use eframe::egui::RichText;
+use egui_plot::{Legend, Line, LineStyle, Plot, Points, VLine};
 use overlay_media::PreviewSize;
+
+/// Telemetry often starts a moment before the first video frame. Until the
+/// video begins, hold its first frame rather than showing nothing. Returns the
+/// video time to show and how long before the video starts the position is.
+pub(super) fn hold_first_frame(video_time: f64) -> (f64, f64) {
+    (video_time.max(0.0), (-video_time).max(0.0))
+}
+
+/// How long a panel keeps polling for a requested video frame before it
+/// stops waiting; a dead decoder must not keep the UI repainting.
+const FRAME_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn legend_editor(
     ui: &mut egui::Ui,
@@ -14,7 +31,7 @@ fn legend_editor(
         ui.collapsing("Legend text", |ui| {
             for (key, default, color) in entries {
                 ui.horizontal(|ui| {
-                    ui.colored_label(*color, "●");
+                    widgets::dot(ui, *color);
                     let label = labels.entry(key.clone()).or_insert_with(|| default.clone());
                     ui.add(egui::TextEdit::singleline(label).desired_width(220.0));
                     if ui.small_button("Reset").clicked() {
@@ -24,6 +41,119 @@ fn legend_editor(
             }
         });
     }
+}
+
+/// "channel (unit)" heading for a plot.
+fn plot_title(name: &str, traces: &[PlotTrace]) -> String {
+    let display_name = if name == DELTA_CHANNEL {
+        DELTA_LABEL
+    } else {
+        name
+    };
+    match traces.first().map(|t| t.unit.symbol()) {
+        Some(unit) if !unit.is_empty() => format!("{display_name} ({unit})"),
+        _ => display_name.to_owned(),
+    }
+}
+
+fn compact_legend() -> Legend {
+    Legend::default()
+        .text_style(egui::TextStyle::Small)
+        .background_alpha(0.55)
+        .grouping(egui_plot::LegendGrouping::ById)
+        // A trace dimmed outside the gates draws its measured part first.
+        .color_conflict_handling(egui_plot::ColorConflictHandling::PickFirst)
+}
+
+fn trace_item_id(key: &str) -> egui::Id {
+    egui::Id::new(("analysis-run", key))
+}
+
+fn legend_overflows(
+    ui: &egui::Ui,
+    entries: &[(String, String, egui::Color32)],
+    labels: &BTreeMap<String, String>,
+    height: f32,
+) -> bool {
+    let row_height = ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y;
+    entries.len() as f32 * row_height + 16.0 > height * 0.65
+        || entries.iter().any(|(key, name, _)| {
+            let label = labels
+                .get(key)
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or(name);
+            widgets::text_width(ui, label, egui::TextStyle::Small) + 40.0
+                > ui.available_width() * 0.65
+        })
+}
+
+/// Keep large legends in one compact anchor inside the plot. The list scrolls
+/// in a popover; its toggles use the plot's own visibility memory.
+fn overflow_legend(
+    ui: &mut egui::Ui,
+    plot_id: egui::Id,
+    frame: egui::Rect,
+    entries: &[(String, String, egui::Color32)],
+    labels: &BTreeMap<String, String>,
+) {
+    let label = format!("Legend ({}) ⏷", entries.len());
+    let width = widgets::text_width(ui, &label, egui::TextStyle::Button)
+        + ui.spacing().button_padding.x * 2.0;
+    let rect = egui::Rect::from_min_size(
+        frame.right_top() + egui::vec2(-width - 4.0, 4.0),
+        egui::vec2(width, ui.spacing().interact_size.y),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt((plot_id, "legend"))
+            .max_rect(rect),
+    );
+    child.set_clip_rect(ui.clip_rect().intersect(frame));
+    widgets::popover(&mut child, label, |ui| {
+        let Some(mut memory) = egui_plot::PlotMemory::load(ui.ctx(), plot_id) else {
+            return;
+        };
+        let mut changed = false;
+        egui::ScrollArea::vertical()
+            .max_height(240.0)
+            .show(ui, |ui| {
+                for (key, name, color) in entries {
+                    ui.horizontal(|ui| {
+                        widgets::dot(ui, *color);
+                        let item_id = trace_item_id(key);
+                        let mut visible = !memory.hidden_items.contains(&item_id);
+                        let label = labels
+                            .get(key)
+                            .filter(|label| !label.trim().is_empty())
+                            .unwrap_or(name);
+                        let fitted = widgets::fit_text(
+                            ui,
+                            label,
+                            (ui.available_width()
+                                - ui.spacing().icon_width
+                                - ui.spacing().icon_spacing)
+                                .max(0.0),
+                        );
+                        if ui
+                            .checkbox(&mut visible, fitted)
+                            .on_hover_text(label)
+                            .changed()
+                        {
+                            if visible {
+                                memory.hidden_items.remove(&item_id);
+                            } else {
+                                memory.hidden_items.insert(item_id);
+                            }
+                            changed = true;
+                        }
+                    });
+                }
+            });
+        if changed {
+            memory.store(ui.ctx(), plot_id);
+            ui.ctx().request_repaint();
+        }
+    });
 }
 
 fn channel_combo(
@@ -101,197 +231,67 @@ impl AnalysisApp {
                 )
             })
             .collect::<Vec<_>>();
-        ui.collapsing("Plot controls", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if !options.delta {
-                    ui.menu_button("Channels", |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(250.0)
-                            .show(ui, |ui| {
-                                for name in self.channel_names() {
-                                    let mut selected = options.channels.contains(&name);
-                                    let label = if name == DELTA_CHANNEL {
-                                        DELTA_LABEL
-                                    } else {
-                                        &name
-                                    };
-                                    if ui.checkbox(&mut selected, label).changed() {
-                                        if selected {
-                                            options.channels.push(name);
-                                        } else {
-                                            options.channels.retain(|n| n != &name);
-                                        }
-                                    }
-                                }
-                            });
-                    });
-                }
-                let mut enabled = options.filter.is_some();
-                if ui.checkbox(&mut enabled, "Panel zero-phase LPF").changed() {
-                    options.filter = enabled.then_some(8.0);
-                }
-                if let Some(hz) = options.filter.as_mut() {
-                    ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
-                }
-            });
-            if !options.delta {
-                ui.collapsing("Units and channel matching", |ui| {
-                    for name in options.channels.clone() {
-                        if name == DELTA_CHANNEL {
-                            continue;
-                        }
-                        let descriptor = self.prepared.runs.iter().find_map(|r| {
-                            self.source_channel(r, &name, options)
-                                .map(|(c, _)| c.descriptor.clone())
-                        });
-                        if let Some(d) = descriptor {
-                            let default = display_unit(d.unit.clone(), d.quantity, units);
-                            let mut target =
-                                options.units.get(&name).cloned().unwrap_or(default.clone());
-                            ui.horizontal(|ui| {
-                                ui.label(&name);
-                                egui::ComboBox::from_id_salt((id, &name, "units"))
-                                    .selected_text(target.symbol())
-                                    .show_ui(ui, |ui| {
-                                        for u in d.unit.compatible_units() {
-                                            ui.selectable_value(&mut target, u.clone(), u.symbol());
-                                        }
-                                    });
-                                if ui.small_button("Default").clicked() {
-                                    options.units.remove(&name);
-                                } else if target != default || options.units.contains_key(&name) {
-                                    options.units.insert(name.clone(), target);
-                                }
-                            });
-                        }
-                        for recording in &self.workspace.recordings {
-                            if !self
-                                .state
-                                .selection
-                                .iter()
-                                .any(|s| s.recording_id == recording.id)
-                            {
-                                continue;
-                            }
-                            let key = format!("{}:{name}", recording.id.0);
-                            egui::ComboBox::from_id_salt((id, &key))
-                                .selected_text(format!(
-                                    "{}: {}",
-                                    recording.name,
-                                    if options.bindings.contains_key(&key) {
-                                        "manual channel"
-                                    } else {
-                                        "automatic"
-                                    }
-                                ))
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(
-                                            !options.bindings.contains_key(&key),
-                                            "Automatic name matching",
-                                        )
-                                        .clicked()
-                                    {
-                                        options.bindings.remove(&key);
-                                    }
-                                    for source in &recording.sources {
-                                        if let Some(d) = self.data.get(&source.id) {
-                                            for channel in d.processed.channels.values() {
-                                                if ui
-                                                    .selectable_label(
-                                                        false,
-                                                        format!(
-                                                            "{} / {} ({})",
-                                                            source.name,
-                                                            channel.descriptor.name,
-                                                            channel.descriptor.unit.symbol()
-                                                        ),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    options.bindings.insert(
-                                                        key.clone(),
-                                                        ChannelRef {
-                                                            source_id: source.id,
-                                                            channel_id: channel.descriptor.id,
-                                                        },
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                        }
-                    }
-                });
-            }
-            legend_editor(
-                ui,
-                &mut options.show_legend,
-                &mut options.legend_labels,
-                &legend_entries,
-            );
-        });
-        if before != serde_json::to_string(options).unwrap_or_default() {
-            self.dirty = true;
-            self.plot_cache.clear();
-        }
-        if options.delta && self.prepared.course.is_none() {
-            ui.label("Time gain/loss needs a reference course and matching GPS coverage.");
-            return;
-        }
         let channels = if options.delta {
             vec![DELTA_CHANNEL.to_string()]
         } else {
             options.channels.clone()
         };
+        let course_missing = options.delta && self.prepared.course.is_none();
+        // The first plot's title shares the header row with the menus.
+        let first_title = match channels.first() {
+            Some(name) if !course_missing => {
+                let traces = self.plot_traces(id, name, options, units);
+                Some(plot_title(name, &traces))
+            }
+            _ => None,
+        };
+        self.plot_controls(
+            ui,
+            id,
+            options,
+            units,
+            &legend_entries,
+            first_title.as_deref(),
+        );
+        if before != serde_json::to_string(options).unwrap_or_default() {
+            self.dirty = true;
+            self.plot_cache.clear();
+        }
+        if course_missing {
+            ui.label("Time gain/loss needs a reference course and matching GPS coverage.");
+            return;
+        }
         let height = (ui.available_height() / channels.len().max(1) as f32 - 10.0).max(140.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for name in channels {
-                let cache_key = format!(
-                    "{id}:{}:{:?}:{units:?}:{name}:{}",
-                    self.prepared_revision,
-                    self.effective_mode(),
-                    serde_json::to_string(options).unwrap_or_default()
-                );
-                if !self.plot_cache.contains_key(&cache_key) {
-                    let prefix = format!(
-                        "{id}:{}:{:?}:{units:?}:{name}:",
-                        self.prepared_revision,
-                        self.effective_mode()
+            for (index, name) in channels.into_iter().enumerate() {
+                let traces = self.plot_traces(id, &name, options, units);
+                if index > 0 {
+                    ui.label(
+                        RichText::new(plot_title(&name, &traces))
+                            .strong()
+                            .color(text::normal()),
                     );
-                    self.plot_cache.retain(|key, _| !key.starts_with(&prefix));
-                    let traces = self.build_plot(&name, options, units);
-                    self.plot_cache.insert(cache_key.clone(), Arc::new(traces));
                 }
-                let traces = self.plot_cache.get(&cache_key).unwrap().clone();
-                let unit = traces.first().map_or("", |t| t.unit.symbol());
-                let display_name = if name == DELTA_CHANNEL {
-                    DELTA_LABEL
-                } else {
-                    &name
-                };
-                ui.label(format!("{display_name} ({unit})"));
                 if traces.is_empty() {
-                    ui.weak("No compatible channel / valid alignment for selected runs.");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak("No compatible channel / valid alignment for selected runs.");
+                        if !options.delta && ui.small_button("Remove from plot").clicked() {
+                            options.channels.retain(|selected| selected != &name);
+                        }
+                    });
                     continue;
                 }
                 let cursor = self
                     .reference_run()
                     .and_then(|r| self.x_at_time(r, r.start + self.state.cursor));
                 let x_label = match self.effective_mode() {
-                    XMode::Time
-                        if automatic_alignment_complete(
-                            &self.prepared,
-                            self.workspace.reference.as_ref(),
-                        ) =>
-                    {
-                        "Correlation-aligned seconds"
-                    }
-                    XMode::Time => "Elapsed seconds",
-                    XMode::Distance => "Each run's traveled meters",
-                    XMode::Course => "Reference-course meters",
+                    XMode::Time => "s",
+                    XMode::Distance | XMode::Course => "m",
                 };
+                let widget_id = ui.make_persistent_id((id, &name, self.effective_mode().label()));
+                let overflow = options.show_legend
+                    && index == 0
+                    && legend_overflows(ui, &legend_entries, &options.legend_labels, height);
                 let mut plot_widget = Plot::new((id, &name, self.effective_mode().label()))
                     .height(height)
                     .allow_zoom([true, false])
@@ -306,8 +306,17 @@ impl AnalysisApp {
                         [true, false],
                     )
                     .x_axis_label(x_label);
-                if options.show_legend {
-                    plot_widget = plot_widget.legend(Legend::default());
+                // One legend per panel: stacked plots share the same runs.
+                if options.show_legend && index == 0 && !overflow {
+                    plot_widget = plot_widget.legend(compact_legend());
+                }
+                // Lines are reduced to what the plot can show at its current
+                // zoom; the view comes from the previous frame's bounds.
+                let plot_id = egui::Id::new(("analysis-plot-view", id, &name));
+                let view = ui.data(|d| d.get_temp::<[f64; 2]>(plot_id));
+                let pixels = ui.available_width().max(1.0) as usize;
+                for [low, high] in traces.iter().filter_map(|trace| trace.x_range) {
+                    plot_widget = plot_widget.include_x(low).include_x(high);
                 }
                 let response = plot_widget.show(ui, |plot| {
                     for trace in traces.iter() {
@@ -316,21 +325,51 @@ impl AnalysisApp {
                             .get(&segment_key(&trace.segment))
                             .filter(|label| !label.trim().is_empty())
                             .unwrap_or(&trace.name);
-                        for piece in &trace.points {
-                            if piece.len() > 1 {
-                                plot.line(Line::new(label, piece.clone()).color(trace.color));
+                        // Measured pieces go first: the legend takes the color
+                        // of a trace's first line.
+                        for outside in [false, true] {
+                            let color = if outside {
+                                trace.color.gamma_multiply(0.3)
+                            } else {
+                                trace.color
+                            };
+                            for (piece, _) in trace
+                                .points
+                                .iter()
+                                .zip(&trace.outside_gates)
+                                .filter(|(_, piece_outside)| **piece_outside == outside)
+                            {
+                                if piece.len() > 1 {
+                                    let shown = decimate::view_points(piece, view, pixels);
+                                    plot.line(
+                                        Line::new(label, shown.into_owned())
+                                            .color(color)
+                                            .id(trace_item_id(&segment_key(&trace.segment))),
+                                    );
+                                }
                             }
                         }
                     }
                     if let Some(x) = cursor {
-                        plot.vline(VLine::new("playhead", x).color(egui::Color32::WHITE));
+                        plot.vline(VLine::new("", x).color(text::strong()));
                     }
                     if let Some(range) = self.state.range
                         && let Some(r) = self.reference_run()
                     {
                         for t in range {
                             if let Some(x) = self.x_at_time(r, r.start + t) {
-                                plot.vline(VLine::new("range", x).color(egui::Color32::GRAY));
+                                plot.vline(VLine::new("", x).color(egui::Color32::GRAY));
+                            }
+                        }
+                    }
+                    if let Some(r) = self.reference_run() {
+                        for t in [r.start_gate, r.finish_gate].into_iter().flatten() {
+                            if let Some(x) = self.x_at_time(r, t) {
+                                plot.vline(
+                                    VLine::new("", x)
+                                        .color(theme::accent())
+                                        .style(LineStyle::dashed_dense()),
+                                );
                             }
                         }
                     }
@@ -343,13 +382,29 @@ impl AnalysisApp {
                         None
                     }
                 });
+                if overflow {
+                    overflow_legend(
+                        ui,
+                        widget_id,
+                        *response.transform.frame(),
+                        &legend_entries,
+                        &options.legend_labels,
+                    );
+                }
+                let bounds = response.transform.bounds();
+                let shown = [bounds.min()[0], bounds.max()[0]];
+                if view != Some(shown) {
+                    ui.data_mut(|d| d.insert_temp(plot_id, shown));
+                    // The next frame needs the new view to draw the right samples.
+                    ui.ctx().request_repaint();
+                }
                 response.response.context_menu(|ui| {
                     ui.checkbox(&mut options.show_legend, "Show legend");
                     ui.separator();
                     ui.label("Legend text");
                     for (key, default, color) in &legend_entries {
                         ui.horizontal(|ui| {
-                            ui.colored_label(*color, "●");
+                            widgets::dot(ui, *color);
                             let label = options
                                 .legend_labels
                                 .entry(key.clone())
@@ -368,6 +423,199 @@ impl AnalysisApp {
             self.dirty = true;
         }
     }
+    /// Always-visible plot header: channel chooser plus an options popover.
+    fn plot_controls(
+        &self,
+        ui: &mut egui::Ui,
+        id: u64,
+        options: &mut PlotOptions,
+        units: UnitSystem,
+        legend_entries: &[(String, String, egui::Color32)],
+        title: Option<&str>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            // The delta panel's title is drawn with its plot below.
+            if !options.delta {
+                let label = format!("Channels ({}) ⏷", options.channels.len());
+                widgets::popover(ui, label, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.0)
+                        .show(ui, |ui| {
+                            let available = self.channel_names();
+                            for name in self.channel_choices(&options.channels) {
+                                let mut selected = options.channels.contains(&name);
+                                let missing = !available.contains(&name);
+                                let label = if name == DELTA_CHANNEL {
+                                    DELTA_LABEL.to_owned()
+                                } else if missing {
+                                    format!("{name} (no loaded source has it)")
+                                } else {
+                                    name.clone()
+                                };
+                                if ui.checkbox(&mut selected, label).changed() {
+                                    if selected {
+                                        options.channels.push(name);
+                                    } else {
+                                        options.channels.retain(|n| n != &name);
+                                    }
+                                }
+                            }
+                        });
+                });
+            }
+            widgets::popover(ui, "Options ⏷", |ui| {
+                widgets::section_label(ui, "Smoothing");
+                ui.horizontal(|ui| {
+                    let mut enabled = options.filter.is_some();
+                    if ui
+                        .checkbox(&mut enabled, "Zero-phase low-pass")
+                        .on_hover_text("Non-causal smoothing applied to this panel only")
+                        .changed()
+                    {
+                        options.filter = enabled.then_some(8.0);
+                    }
+                    if let Some(hz) = options.filter.as_mut() {
+                        ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
+                    }
+                });
+                if !options.delta {
+                    widgets::section_label(ui, "Units and channel matching");
+                    egui::ScrollArea::vertical()
+                        .id_salt("plot-units")
+                        .max_height(240.0)
+                        .show(ui, |ui| self.plot_unit_rows(ui, id, options, units));
+                }
+                widgets::section_label(ui, "Legend");
+                legend_editor(
+                    ui,
+                    &mut options.show_legend,
+                    &mut options.legend_labels,
+                    legend_entries,
+                );
+            });
+            if let Some(title) = title {
+                ui.label(RichText::new(title).strong().color(text::normal()));
+            }
+        });
+    }
+
+    /// Prepared traces for one channel, rebuilt only when inputs change.
+    fn plot_traces(
+        &mut self,
+        id: u64,
+        name: &str,
+        options: &PlotOptions,
+        units: UnitSystem,
+    ) -> Arc<Vec<PlotTrace>> {
+        let cache_key = format!(
+            "{id}:{}:{:?}:{units:?}:{name}:{}",
+            self.prepared_revision,
+            self.effective_mode(),
+            serde_json::to_string(options).unwrap_or_default()
+        );
+        if !self.plot_cache.contains_key(&cache_key) {
+            let prefix = format!(
+                "{id}:{}:{:?}:{units:?}:{name}:",
+                self.prepared_revision,
+                self.effective_mode()
+            );
+            self.plot_cache.retain(|key, _| !key.starts_with(&prefix));
+            let traces = self.build_plot(name, options, units);
+            self.plot_cache.insert(cache_key.clone(), Arc::new(traces));
+        }
+        self.plot_cache[&cache_key].clone()
+    }
+
+    fn plot_unit_rows(
+        &self,
+        ui: &mut egui::Ui,
+        id: u64,
+        options: &mut PlotOptions,
+        units: UnitSystem,
+    ) {
+        for name in options.channels.clone() {
+            if name == DELTA_CHANNEL {
+                continue;
+            }
+            let descriptor = self.prepared.runs.iter().find_map(|r| {
+                self.source_channel(r, &name, options)
+                    .map(|(c, _)| c.descriptor.clone())
+            });
+            if let Some(d) = descriptor {
+                let default = display_unit(d.unit.clone(), d.quantity, units);
+                let mut target = options.units.get(&name).cloned().unwrap_or(default.clone());
+                ui.horizontal(|ui| {
+                    ui.label(&name);
+                    egui::ComboBox::from_id_salt((id, &name, "units"))
+                        .selected_text(target.symbol())
+                        .show_ui(ui, |ui| {
+                            for u in d.unit.compatible_units() {
+                                ui.selectable_value(&mut target, u.clone(), u.symbol());
+                            }
+                        });
+                    if ui.small_button("Default").clicked() {
+                        options.units.remove(&name);
+                    } else if target != default || options.units.contains_key(&name) {
+                        options.units.insert(name.clone(), target);
+                    }
+                });
+            }
+            for recording in &self.workspace.recordings {
+                if !self
+                    .state
+                    .selection
+                    .iter()
+                    .any(|s| s.recording_id == recording.id)
+                {
+                    continue;
+                }
+                let key = format!("{}:{name}", recording.id.0);
+                egui::ComboBox::from_id_salt((id, &key))
+                    .selected_text(format!(
+                        "{}: {}",
+                        recording.name,
+                        if options.bindings.contains_key(&key) {
+                            "manual channel"
+                        } else {
+                            "automatic"
+                        }
+                    ))
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(
+                                !options.bindings.contains_key(&key),
+                                "Automatic name matching",
+                            )
+                            .clicked()
+                        {
+                            options.bindings.remove(&key);
+                        }
+                        for source in &recording.sources {
+                            let Some(d) = self.data.get(&source.id) else {
+                                continue;
+                            };
+                            for channel in d.processed.channels.values() {
+                                let label = format!(
+                                    "{} / {} ({})",
+                                    source.name,
+                                    channel.descriptor.name,
+                                    channel.descriptor.unit.symbol()
+                                );
+                                if ui.selectable_label(false, label).clicked() {
+                                    options.bindings.insert(
+                                        key.clone(),
+                                        ChannelRef {
+                                            source_id: source.id,
+                                            channel_id: channel.descriptor.id,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    });
+            }
+        }
+    }
     pub(super) fn build_plot(
         &self,
         name: &str,
@@ -380,33 +628,43 @@ impl AnalysisApp {
             if !self.state.selection.contains(&run.key) {
                 continue;
             }
-            let (samples, unit, gap) = if options.delta || name == DELTA_CHANNEL {
+            let delta = options.delta || name == DELTA_CHANNEL;
+            // Delta samples are timed on the reference clock.
+            let gates = if delta {
+                self.reference_run()
+            } else {
+                Some(run)
+            }
+            .and_then(|timed| Some((timed.start_gate?, timed.finish_gate)));
+            let measured = |t: f64| {
+                gates.is_none_or(|(start, finish)| t >= start && finish.is_none_or(|f| t <= f))
+            };
+            let (samples, unit, gap) = if delta {
                 let Some(reference) = self.reference_run() else {
                     continue;
                 };
-                let reference_window = self.delta_window(reference);
-                let run_window = self.delta_window(run);
+                let reference_origin = self.elapsed_origin(reference);
+                let run_origin = self.elapsed_origin(run);
                 let mut values = reference
                     .progress
                     .iter()
                     .filter(|point| {
-                        point.recording_time >= reference_window.0
-                            && point.recording_time <= reference_window.1
+                        point.recording_time >= reference.start
+                            && point.recording_time <= reference.end
                     })
                     .map(|p| {
                         let other = if run.key == reference.key {
                             Some(p.recording_time)
                         } else {
                             time_at_progress(&run.progress, p.progress)
-                                .filter(|time| *time >= run_window.0 && *time <= run_window.1)
+                                .filter(|time| *time >= run.start && *time <= run.end)
                         };
                         let x = self.x_at_time(reference, p.recording_time);
                         let value = if p.confidence > 0.0 {
                             x.zip(other).map(|(x, other)| {
                                 [
                                     x,
-                                    (other - run_window.0)
-                                        - (p.recording_time - reference_window.0),
+                                    (other - run_origin) - (p.recording_time - reference_origin),
                                 ]
                             })
                         } else {
@@ -415,15 +673,16 @@ impl AnalysisApp {
                         (p.recording_time, value.unwrap_or([f64::NAN; 2]))
                     })
                     .collect::<Vec<_>>();
-                if !self.workspace.course.gates.is_empty()
-                    && let Some(baseline) = values
-                        .iter()
-                        .find_map(|(_, point)| point[1].is_finite().then_some(point[1]))
+                if reference.start_gate.is_some()
+                    && run.start_gate.is_some()
+                    && let Some(baseline) = values.iter().find_map(|(time, point)| {
+                        (*time >= reference_origin && point[1].is_finite()).then_some(point[1])
+                    })
                 {
-                    // Gate-defined runs share a meaningful start line. Rebase
-                    // the comparison at the first jointly covered course
-                    // position so GPS sample cadence cannot introduce a
-                    // non-zero delta at the start gate.
+                    // Runs that cross the start gate share a meaningful start
+                    // line. Rebase at the first jointly covered position from
+                    // the gate on, so GPS sample cadence and course projection
+                    // cannot introduce a non-zero delta at the gate.
                     for (_, point) in &mut values {
                         if point[1].is_finite() {
                             point[1] -= baseline;
@@ -519,12 +778,15 @@ impl AnalysisApp {
                 (values, target, channel.series.gap_seconds.unwrap_or(2.0))
             };
             let mut pieces = vec![];
-            let mut piece = vec![];
+            let mut outside_gates = vec![];
+            let mut piece: Vec<[f64; 2]> = vec![];
+            let mut piece_measured = true;
             let mut previous = None;
             for (t, value) in samples {
                 if !value.iter().all(|v| v.is_finite()) || previous.is_some_and(|p| t - p > gap) {
                     if piece.len() > 1 {
                         pieces.push(std::mem::take(&mut piece));
+                        outside_gates.push(!piece_measured);
                     } else {
                         piece.clear();
                     }
@@ -533,11 +795,25 @@ impl AnalysisApp {
                     previous = None;
                     continue;
                 }
+                let inside = measured(t);
+                if let Some(&last) = piece.last()
+                    && inside != piece_measured
+                {
+                    // The new piece starts at the last sample so the line
+                    // stays continuous across the gate.
+                    if piece.len() > 1 {
+                        pieces.push(std::mem::take(&mut piece));
+                        outside_gates.push(!piece_measured);
+                    }
+                    piece = vec![last];
+                }
+                piece_measured = inside;
                 piece.push(value);
                 previous = Some(t);
             }
             if piece.len() > 1 {
                 pieces.push(piece);
+                outside_gates.push(!piece_measured);
             }
             result.push(PlotTrace {
                 segment: run.key.clone(),
@@ -547,7 +823,14 @@ impl AnalysisApp {
                     self.workspace.reference.as_ref(),
                     &run.key,
                 ),
+                x_range: pieces.iter().flatten().map(|point| point[0]).fold(
+                    None,
+                    |range: Option<[f64; 2]>, x| {
+                        Some(range.map_or([x, x], |[low, high]| [low.min(x), high.max(x)]))
+                    },
+                ),
                 points: pieces,
+                outside_gates,
                 unit,
             });
         }
@@ -584,31 +867,39 @@ impl AnalysisApp {
                 )
             })
             .collect::<Vec<_>>();
-        ui.collapsing("Scatter controls", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                channel_combo(ui, (id, "scatter-x"), "X", &mut options.x_channel, &names);
-                channel_combo(ui, (id, "scatter-y"), "Y", &mut options.y_channel, &names);
-                let mut use_z = options.z_channel.is_some();
-                if ui.checkbox(&mut use_z, "Color by Z").changed() {
-                    options.z_channel = use_z.then(|| "gps_speed".into());
-                }
-                if let Some(z) = options.z_channel.as_mut() {
-                    channel_combo(ui, (id, "scatter-z"), "Z", z, &names);
-                }
-                let mut filter = options.filter.is_some();
-                if ui.checkbox(&mut filter, "Zero-phase LPF").changed() {
-                    options.filter = filter.then_some(8.0);
-                }
-                if let Some(hz) = options.filter.as_mut() {
-                    ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
-                }
+        ui.horizontal_wrapped(|ui| {
+            channel_combo(ui, (id, "scatter-x"), "X", &mut options.x_channel, &names);
+            channel_combo(ui, (id, "scatter-y"), "Y", &mut options.y_channel, &names);
+            let mut use_z = options.z_channel.is_some();
+            if ui
+                .checkbox(&mut use_z, "Color by")
+                .on_hover_text("Color samples by a third channel")
+                .changed()
+            {
+                options.z_channel = use_z.then(|| "gps_speed".into());
+            }
+            if let Some(z) = options.z_channel.as_mut() {
+                channel_combo(ui, (id, "scatter-z"), "Z", z, &names);
+            }
+            widgets::popover(ui, "Options ⏷", |ui| {
+                widgets::section_label(ui, "Smoothing");
+                ui.horizontal(|ui| {
+                    let mut filter = options.filter.is_some();
+                    if ui.checkbox(&mut filter, "Zero-phase low-pass").changed() {
+                        options.filter = filter.then_some(8.0);
+                    }
+                    if let Some(hz) = options.filter.as_mut() {
+                        ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
+                    }
+                });
+                widgets::section_label(ui, "Legend");
+                legend_editor(
+                    ui,
+                    &mut options.show_legend,
+                    &mut options.legend_labels,
+                    &legend_entries,
+                );
             });
-            legend_editor(
-                ui,
-                &mut options.show_legend,
-                &mut options.legend_labels,
-                &legend_entries,
-            );
         });
 
         let cache_key = format!(
@@ -647,6 +938,14 @@ impl AnalysisApp {
         if let (Some(z), Some(range)) = (&options.z_channel, z_range) {
             color_bar(ui, z, range);
         }
+        let widget_id = ui.make_persistent_id((id, "scatter"));
+        let overflow = options.show_legend
+            && legend_overflows(
+                ui,
+                &legend_entries,
+                &options.legend_labels,
+                ui.available_height(),
+            );
         let mut plot_widget = Plot::new((id, "scatter"))
             .x_axis_label(format!(
                 "{} ({})",
@@ -659,8 +958,8 @@ impl AnalysisApp {
                 y_unit.as_ref().map_or("", Unit::symbol)
             ))
             .allow_boxed_zoom(false);
-        if options.show_legend {
-            plot_widget = plot_widget.legend(Legend::default());
+        if options.show_legend && !overflow {
+            plot_widget = plot_widget.legend(compact_legend());
         }
         let response = plot_widget.show(ui, |plot| {
             for trace in traces.iter() {
@@ -689,6 +988,7 @@ impl AnalysisApp {
                             plot.points(
                                 Points::new(name, points)
                                     .radius(2.0)
+                                    .id(trace_item_id(&segment_key(&trace.segment)))
                                     .color(color_map((low + high) * 0.5, range)),
                             );
                         }
@@ -699,17 +999,31 @@ impl AnalysisApp {
                         .iter()
                         .map(|point| [point[0], point[1]])
                         .collect::<Vec<_>>();
-                    plot.points(Points::new(label, points).radius(2.0).color(trace.color));
+                    plot.points(
+                        Points::new(label, points)
+                            .radius(2.0)
+                            .color(trace.color)
+                            .id(trace_item_id(&segment_key(&trace.segment))),
+                    );
                 }
             }
         });
+        if overflow {
+            overflow_legend(
+                ui,
+                widget_id,
+                *response.transform.frame(),
+                &legend_entries,
+                &options.legend_labels,
+            );
+        }
         response.response.context_menu(|ui| {
             ui.checkbox(&mut options.show_legend, "Show legend");
             ui.separator();
             ui.label("Legend text");
             for (key, default, color) in &legend_entries {
                 ui.horizontal(|ui| {
-                    ui.colored_label(*color, "●");
+                    widgets::dot(ui, *color);
                     let label = options
                         .legend_labels
                         .entry(key.clone())
@@ -830,6 +1144,28 @@ impl AnalysisApp {
             .collect()
     }
 
+    /// The reframing settings of the recording behind `key`, defaulted for raw
+    /// INSV video and absent for ordinary video.
+    fn video_processing_for(
+        &self,
+        key: Option<&SegmentRef>,
+    ) -> Option<overlay_core::VideoProcessingConfig> {
+        let key = key?;
+        let recording = self
+            .workspace
+            .recordings
+            .iter()
+            .find(|recording| recording.id == key.recording_id)?;
+        let path = recording
+            .video_path
+            .as_ref()
+            .filter(|path| !path.as_os_str().is_empty())?;
+        recording
+            .video_processing
+            .clone()
+            .or_else(|| crate::video_processing::default_processing(path))
+    }
+
     pub(super) fn video(
         &mut self,
         ui: &mut egui::Ui,
@@ -840,13 +1176,46 @@ impl AnalysisApp {
         self.visible_videos.insert(id);
         let automatic = self.state.selection.get(options.slot).cloned();
         let mut key = options.segment.clone().or(automatic.clone());
+        let started_with = key.clone();
+        // Reframing controls share the picker's row (or fold into a menu when
+        // it is narrow) instead of taking rows of their own.
+        let mut processing = self.video_processing_for(key.as_ref());
         ui.horizontal_wrapped(|ui| {
+            // Reserve the actual compact controls before sizing the picker.
+            // A long lap name must not squeeze the Video button into a sliver.
+            let spacing = ui.spacing();
+            let linked_width = spacing.icon_width
+                + spacing.icon_spacing
+                + widgets::text_width(ui, "Linked", egui::TextStyle::Body);
+            let controls_width = if processing.is_some() {
+                widgets::text_width(ui, "Video ⏷", egui::TextStyle::Button)
+                    + spacing.button_padding.x * 2.0
+                    + spacing.item_spacing.x
+            } else {
+                0.0
+            };
+            let picker_width =
+                (ui.available_width() - linked_width - controls_width - spacing.item_spacing.x)
+                    .clamp(0.0, 260.0);
+            let selected_name = key
+                .as_ref()
+                .and_then(|key| self.prepared.runs.iter().find(|run| &run.key == key))
+                .map_or("Choose lap / run", |run| run.name.as_str());
+            // ComboBox::width is a minimum, even in truncate mode. Fit its
+            // selected label explicitly so it cannot consume reserved space.
+            let picker_text = widgets::fit_text(
+                ui,
+                selected_name,
+                (picker_width
+                    - spacing.button_padding.x * 2.0
+                    - spacing.icon_width
+                    - spacing.icon_spacing)
+                    .max(0.0),
+            );
             egui::ComboBox::from_id_salt((id, "video-lap"))
-                .selected_text(
-                    key.as_ref()
-                        .and_then(|k| self.prepared.runs.iter().find(|r| &r.key == k))
-                        .map_or("Choose lap / run", |r| r.name.as_str()),
-                )
+                .width(picker_width)
+                .truncate()
+                .selected_text(picker_text)
                 .show_ui(ui, |ui| {
                     if ui
                         .selectable_label(options.segment.is_none(), "Follow comparison selection")
@@ -864,22 +1233,44 @@ impl AnalysisApp {
                             options.segment = key.clone();
                         }
                     }
-                });
-            ui.checkbox(&mut options.linked, "Linked");
+                })
+                .response
+                .on_hover_text(selected_name);
+            ui.checkbox(&mut options.linked, "Linked").on_hover_text(
+                "Follow the shared playhead. Unlink to inspect this video's own timestamp.",
+            );
             if !options.linked {
                 ui.add(
                     egui::DragValue::new(&mut options.time)
                         .speed(0.02)
-                        .prefix("Video s "),
+                        .prefix("Video ")
+                        .suffix(" s"),
                 );
             }
+            if let Some(config) = &mut processing {
+                ui.push_id(id, |ui| {
+                    crate::video_processing::controls(ui, config);
+                });
+            }
         });
+        if key != started_with {
+            // The picker changed recording this frame; edits belong to the old one.
+            processing = self.video_processing_for(key.as_ref());
+        }
         let Some(key) = key else {
-            ui.label("Select a lap/run in the browser.");
+            widgets::empty_state(
+                ui,
+                "No run selected",
+                "Tick a lap in Recordings & laps, or choose one above.",
+                |_| {},
+            );
             return;
         };
         let Some(run) = self.prepared.runs.iter().find(|r| r.key == key) else {
-            ui.label("Preparing lap…");
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("Preparing lap…");
+            });
             return;
         };
         let Some(recording) = self
@@ -896,18 +1287,19 @@ impl AnalysisApp {
             .clone()
             .filter(|p| !p.as_os_str().is_empty())
         else {
-            ui.label("No video attached. Telemetry is ready to compare.");
+            let recording_id = recording.id;
+            let mut attach = false;
+            widgets::empty_state(
+                ui,
+                "No video for this run",
+                "Telemetry is ready to compare. Attach the matching video to see it here.",
+                |ui| attach = ui.button("Attach video…").clicked(),
+            );
+            if attach {
+                self.attach_video_dialog(recording_id);
+            }
             return;
         };
-        let mut processing = recording
-            .video_processing
-            .clone()
-            .or_else(|| crate::video_processing::default_processing(&path));
-        if let Some(config) = &mut processing {
-            ui.push_id(id, |ui| {
-                crate::video_processing::controls(ui, config);
-            });
-        }
         if processing != recording.video_processing {
             if let Some(target) = self
                 .workspace
@@ -920,7 +1312,11 @@ impl AnalysisApp {
             self.dirty = true;
         }
         let Some(tools) = tools else {
-            ui.label("FFmpeg unavailable. Telemetry analysis is unaffected.");
+            widgets::callout(
+                ui,
+                Tone::Warn,
+                "FFmpeg was not found, so video cannot be shown. Install FFmpeg and relaunch; telemetry analysis is unaffected.",
+            );
             return;
         };
         let timestamp = if options.linked {
@@ -928,11 +1324,12 @@ impl AnalysisApp {
         } else {
             Some(options.time)
         };
-        let Some(timestamp) = timestamp.filter(|t| t.is_finite() && *t >= 0.0) else {
+        let Some(timestamp) = timestamp.filter(|t| t.is_finite()) else {
             self.videos.remove(&id);
-            ui.label("No video / alignment coverage at this position.");
+            widgets::hint(ui, "No video or alignment coverage at this position.");
             return;
         };
+        let (timestamp, video_starts_in) = hold_first_frame(timestamp);
         if !self.metadata.contains_key(&path) && self.probing.insert(path.clone()) {
             let tx = self.tx.clone();
             let file = path.clone();
@@ -947,7 +1344,7 @@ impl AnalysisApp {
         let metadata = match self.metadata.get(&path) {
             Some(Ok(m)) => m,
             Some(Err(e)) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, e);
+                widgets::callout(ui, Tone::Bad, e.clone());
                 return;
             }
             None => {
@@ -957,13 +1354,23 @@ impl AnalysisApp {
         };
         if metadata.duration.is_some_and(|d| timestamp >= d) {
             self.videos.remove(&id);
-            ui.label("Video ends before this position.");
+            widgets::hint(ui, "The video ends before this position.");
             return;
         }
         if options.linked {
             options.time = timestamp;
         }
-        ui.small(format!("{} · video {:.3}s", run.name, timestamp));
+        if video_starts_in > 0.0 {
+            widgets::hint(
+                ui,
+                format!(
+                    "{} · video starts {:.3} s later; showing its first frame",
+                    run.name, video_starts_in
+                ),
+            );
+        } else {
+            widgets::hint(ui, format!("{} · video {:.3} s", run.name, timestamp));
+        }
         let width = ((ui.available_width().clamp(160.0, 960.0) as u32) / 32 * 32).max(160);
         let height = (if processing.is_some() {
             width as f64 * 9.0 / 16.0
@@ -988,6 +1395,7 @@ impl AnalysisApp {
                     processing: processing.clone(),
                     texture: None,
                     requested: None,
+                    awaiting_since: None,
                     error: None,
                 },
             );
@@ -1003,8 +1411,9 @@ impl AnalysisApp {
                 (t - timestamp).abs() > 1.0 / 60.0 || w != width || h != height
             })
         {
-            if let Err(e) = runtime.decoder.request(timestamp, size) {
-                runtime.error = Some(e.to_string());
+            match runtime.decoder.request(timestamp, size) {
+                Ok(()) => runtime.awaiting_since = Some(Instant::now()),
+                Err(e) => runtime.error = Some(e.to_string()),
             }
             runtime.requested = Some((timestamp, width, height));
         }
@@ -1012,6 +1421,7 @@ impl AnalysisApp {
             match result {
                 Ok(frame) => {
                     if (frame.timestamp - timestamp).abs() < 0.3 {
+                        runtime.awaiting_since = None;
                         runtime.error = None;
                         let image = egui::ColorImage::from_rgba_unmultiplied(
                             [frame.width as usize, frame.height as usize],
@@ -1029,6 +1439,7 @@ impl AnalysisApp {
                     }
                 }
                 Err(e) => {
+                    runtime.awaiting_since = None;
                     runtime.error = Some(e.to_string());
                     if processing.is_some() {
                         runtime.texture = None;
@@ -1037,7 +1448,7 @@ impl AnalysisApp {
             }
         }
         if let Some(error) = &runtime.error {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
+            widgets::callout(ui, Tone::Bad, error.clone());
         }
         if let Some(texture) = &runtime.texture {
             let response = ui.add(
@@ -1055,8 +1466,9 @@ impl AnalysisApp {
             {
                 runtime.decoder.set_config(config);
                 runtime.processing = Some(config.clone());
-                if let Err(e) = runtime.decoder.request(timestamp, size) {
-                    runtime.error = Some(e.to_string());
+                match runtime.decoder.request(timestamp, size) {
+                    Ok(()) => runtime.awaiting_since = Some(Instant::now()),
+                    Err(e) => runtime.error = Some(e.to_string()),
                 }
             }
         } else {
@@ -1064,7 +1476,7 @@ impl AnalysisApp {
         }
         let status = runtime.decoder.status();
         if !status.is_empty() {
-            ui.weak(status);
+            widgets::hint(ui, status);
         }
         if processing != recording.video_processing {
             if let Some(target) = self
@@ -1077,8 +1489,18 @@ impl AnalysisApp {
             }
             self.dirty = true;
         }
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(33));
+        // Frames arrive from a worker thread without waking the UI, so poll
+        // while one is outstanding. A settled panel must not repaint at all:
+        // every repaint re-lays-out every plot.
+        if self
+            .videos
+            .get(&id)
+            .and_then(|runtime| runtime.awaiting_since)
+            .is_some_and(|since| since.elapsed() < FRAME_WAIT_LIMIT)
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
     }
     pub(super) fn map(
         &mut self,
@@ -1089,96 +1511,6 @@ impl AnalysisApp {
         units: UnitSystem,
     ) {
         let settings_before = serde_json::to_string(&(&*channel, &*settings)).unwrap_or_default();
-        ui.horizontal(|ui| {
-            let label = if settings.controls_expanded {
-                "▼ Map controls"
-            } else {
-                "▶ Map controls"
-            };
-            if ui
-                .selectable_label(settings.controls_expanded, label)
-                .clicked()
-            {
-                settings.controls_expanded = !settings.controls_expanded;
-            }
-            ui.weak(match settings.color_mode {
-                MapColorMode::Value => format!("Channel colormap · {channel}"),
-                MapColorMode::Run => "Solid color by run".into(),
-            });
-        });
-        if settings.controls_expanded {
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_id_salt((id, "map-color-mode"))
-                    .selected_text(match settings.color_mode {
-                        MapColorMode::Value => "Channel colormap",
-                        MapColorMode::Run => "Solid color by run",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut settings.color_mode,
-                            MapColorMode::Value,
-                            "Channel colormap",
-                        );
-                        ui.selectable_value(
-                            &mut settings.color_mode,
-                            MapColorMode::Run,
-                            "Solid color by run",
-                        );
-                    });
-                if settings.color_mode == MapColorMode::Value {
-                    egui::ComboBox::from_id_salt((id, "map-channel"))
-                        .selected_text(channel.as_str())
-                        .show_ui(ui, |ui| {
-                            for name in self
-                                .channel_names()
-                                .into_iter()
-                                .filter(|name| name != DELTA_CHANNEL)
-                            {
-                                ui.selectable_value(channel, name.clone(), name);
-                            }
-                        });
-                    let descriptor = self.prepared.runs.iter().find_map(|r| {
-                        self.source_channel(r, channel, &PlotOptions::default())
-                            .map(|(c, _)| c.descriptor.clone())
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        let mut enabled = settings.low_pass_hz.is_some();
-                        if ui
-                            .checkbox(&mut enabled, "Map value zero-phase LPF")
-                            .changed()
-                        {
-                            settings.low_pass_hz = enabled.then_some(8.0);
-                        }
-                        if let Some(hz) = settings.low_pass_hz.as_mut() {
-                            ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
-                        }
-                        if let Some(d) = &descriptor {
-                            let default = display_unit(d.unit.clone(), d.quantity.clone(), units);
-                            let mut target = settings
-                                .display_unit
-                                .clone()
-                                .filter(|u| d.unit.compatible_units().contains(u))
-                                .unwrap_or_else(|| default.clone());
-                            egui::ComboBox::from_id_salt((id, "map-unit"))
-                                .selected_text(target.symbol())
-                                .show_ui(ui, |ui| {
-                                    for unit in d.unit.compatible_units() {
-                                        ui.selectable_value(
-                                            &mut target,
-                                            unit.clone(),
-                                            unit.symbol(),
-                                        );
-                                    }
-                                });
-                            settings.display_unit = (target != default).then_some(target);
-                            if ui.small_button("Default unit").clicked() {
-                                settings.display_unit = None;
-                            }
-                        }
-                    });
-                }
-            });
-        }
         let descriptor = self.prepared.runs.iter().find_map(|r| {
             self.source_channel(r, channel, &PlotOptions::default())
                 .map(|(c, _)| c.descriptor.clone())
@@ -1249,6 +1581,7 @@ impl AnalysisApp {
                         .map_or(Interpolation::Linear, |(c, _)| c.descriptor.interpolation),
                     gap_seconds: descriptor.and_then(|(c, _)| c.series.gap_seconds),
                     cursor_time: None,
+                    is_reference: self.workspace.reference.as_ref() == Some(&run.key),
                 });
             }
             self.map_cache.insert(cache_key.clone(), traces);
@@ -1268,6 +1601,9 @@ impl AnalysisApp {
             .as_ref()
             .map(|p| p.with_extension("assets"))
             .unwrap_or_else(crate::app_paths::unsaved_analysis_imagery_dir);
+        self.map_header(
+            ui, id, channel, settings, units, &mut panel, &traces, &asset_dir,
+        );
         let unit = target_unit;
         let label = format!("{} ({})", channel, unit.as_ref().map_or("", Unit::symbol));
         let selected = panel.ui(
@@ -1294,107 +1630,171 @@ impl AnalysisApp {
             self.dirty = true;
         }
     }
-    pub(super) fn statistics(&mut self, ui: &mut egui::Ui, units: UnitSystem) {
-        ui.label("Values at the linked playhead; min/max/mean over the selected reference range (or the full run).");
-        let options = PlotOptions::default();
-        let channels = [
-            "gps_speed",
-            "rpm",
-            "water_temperature",
-            "exhaust_temperature",
-            "gps_lateral_acceleration",
-            "gps_inline_acceleration",
-        ];
-        egui::ScrollArea::both().show(ui, |ui| {
-            for run in &self.prepared.runs {
-                if !self.state.selection.contains(&run.key) {
-                    continue;
+    /// Color mode, channel, and an options popover for a map panel.
+    #[allow(clippy::too_many_arguments)]
+    fn map_header(
+        &self,
+        ui: &mut egui::Ui,
+        id: u64,
+        channel: &mut String,
+        settings: &mut MapSettings,
+        units: UnitSystem,
+        panel: &mut crate::analysis_maps::MapPanel,
+        traces: &[MapTrace],
+        asset_dir: &Path,
+    ) {
+        // Narrow panels fold everything into one menu (a single short row);
+        // wide ones show the mode and channel pickers inline.
+        if ui.available_width() < 380.0 {
+            widgets::popover(ui, "Map ⏷", |ui| {
+                self.map_mode_controls(ui, id, channel, settings);
+                if settings.color_mode == MapColorMode::Value {
+                    self.map_value_options(ui, id, channel, settings, units);
                 }
-                ui.colored_label(
-                    run_color(
-                        &self.state.selection,
-                        self.workspace.reference.as_ref(),
-                        &run.key,
-                    ),
-                    &run.name,
-                );
-                let range = self
-                    .state
-                    .range
-                    .and_then(|range| {
-                        let reference = self.reference_run()?;
-                        let a = self.x_at_time(reference, reference.start + range[0])?;
-                        let b = self.x_at_time(reference, reference.start + range[1])?;
-                        Some((self.time_at_x(run, a)?, self.time_at_x(run, b)?))
-                    })
-                    .or_else(|| self.state.range.is_none().then_some((run.start, run.end)));
-                let Some(range) = range else {
-                    ui.weak("Selected range is outside this run's matched coverage.");
-                    continue;
-                };
-                for name in channels {
-                    let Some((channel, off)) = self.source_channel(run, name, &options) else {
-                        continue;
-                    };
-                    let target = display_unit(
-                        channel.descriptor.unit.clone(),
-                        channel.descriptor.quantity.clone(),
-                        units,
-                    );
-                    let convert =
-                        |v| Unit::convert_value(v, &channel.descriptor.unit, &target).unwrap_or(v);
-                    let value = self
-                        .run_time(run)
-                        .and_then(|t| {
-                            sample_value(
-                                &channel.series.samples,
-                                t + off,
-                                channel.descriptor.interpolation,
-                                channel.series.gap_seconds,
-                            )
-                        })
-                        .map(convert);
-                    let cache_id = ui.id().with((
-                        self.prepared_revision,
-                        run.key.segment_id.0,
-                        channel.descriptor.id.0,
-                        range.0.to_bits(),
-                        range.1.to_bits(),
-                        format!("{target:?}"),
-                    ));
-                    let (n, min, max, sum) = ui
-                        .data_mut(|d| d.get_temp::<(u64, f64, f64, f64)>(cache_id))
-                        .unwrap_or_else(|| {
-                            let samples = &channel.series.samples;
-                            let start = samples.partition_point(|s| s.time - off < range.0);
-                            let end = samples.partition_point(|s| s.time - off <= range.1);
-                            let stats = samples[start..end.max(start)]
-                                .iter()
-                                .map(|s| convert(s.value))
-                                .filter(|v| v.is_finite())
-                                .fold(
-                                    (0u64, f64::INFINITY, f64::NEG_INFINITY, 0.0),
-                                    |(n, min, max, sum), v| {
-                                        (n + 1, min.min(v), max.max(v), sum + v)
-                                    },
-                                );
-                            ui.data_mut(|d| d.insert_temp(cache_id, stats));
-                            stats
-                        });
-                    ui.label(format!(
-                        "{name}: {} {}",
-                        value.map_or("—".into(), |v| format!("{v:.2}")),
-                        target.symbol()
-                    ));
-                    if n > 0 {
-                        ui.small(format!(
-                            "min {min:.2} · max {max:.2} · mean {:.2}",
-                            sum / n as f64
-                        ));
+                panel.options_ui(ui, traces, settings, asset_dir);
+            });
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            self.map_mode_controls(ui, id, channel, settings);
+            widgets::popover(ui, "Options ⏷", |ui| {
+                if settings.color_mode == MapColorMode::Value {
+                    self.map_value_options(ui, id, channel, settings, units);
+                }
+                panel.options_ui(ui, traces, settings, asset_dir);
+            });
+        });
+    }
+
+    /// Channel-versus-run coloring and the channel picker.
+    fn map_mode_controls(
+        &self,
+        ui: &mut egui::Ui,
+        id: u64,
+        channel: &mut String,
+        settings: &mut MapSettings,
+    ) {
+        widgets::segmented(
+            ui,
+            &mut settings.color_mode,
+            &[
+                (
+                    MapColorMode::Value,
+                    "Channel",
+                    "Color the course by a channel value",
+                ),
+                (
+                    MapColorMode::Run,
+                    "Runs",
+                    "Give each run its own solid color",
+                ),
+            ],
+        );
+        if settings.color_mode == MapColorMode::Value {
+            egui::ComboBox::from_id_salt((id, "map-channel"))
+                .selected_text(channel.as_str())
+                .show_ui(ui, |ui| {
+                    for name in self
+                        .channel_names()
+                        .into_iter()
+                        .filter(|name| name != DELTA_CHANNEL)
+                    {
+                        ui.selectable_value(channel, name.clone(), name);
                     }
-                }
-                ui.separator();
+                });
+        }
+    }
+
+    fn map_value_options(
+        &self,
+        ui: &mut egui::Ui,
+        id: u64,
+        channel: &str,
+        settings: &mut MapSettings,
+        units: UnitSystem,
+    ) {
+        let descriptor = self.prepared.runs.iter().find_map(|r| {
+            self.source_channel(r, channel, &PlotOptions::default())
+                .map(|(c, _)| c.descriptor.clone())
+        });
+        widgets::section_label(ui, "Value");
+        ui.horizontal(|ui| {
+            let mut enabled = settings.low_pass_hz.is_some();
+            if ui.checkbox(&mut enabled, "Zero-phase low-pass").changed() {
+                settings.low_pass_hz = enabled.then_some(8.0);
+            }
+            if let Some(hz) = settings.low_pass_hz.as_mut() {
+                ui.add(egui::DragValue::new(hz).range(0.1..=100.0).suffix(" Hz"));
             }
         });
+        if let Some(d) = &descriptor {
+            let default = display_unit(d.unit.clone(), d.quantity.clone(), units);
+            let mut target = settings
+                .display_unit
+                .clone()
+                .filter(|u| d.unit.compatible_units().contains(u))
+                .unwrap_or_else(|| default.clone());
+            ui.horizontal(|ui| {
+                ui.label("Unit");
+                egui::ComboBox::from_id_salt((id, "map-unit"))
+                    .selected_text(target.symbol())
+                    .show_ui(ui, |ui| {
+                        for unit in d.unit.compatible_units() {
+                            ui.selectable_value(&mut target, unit.clone(), unit.symbol());
+                        }
+                    });
+                if ui.small_button("Default").clicked() {
+                    target = default.clone();
+                }
+            });
+            settings.display_unit = (target != default).then_some(target);
+        }
+    }
+}
+
+#[cfg(test)]
+mod legend_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn overflow_legend_toggles_the_plot_without_growing_the_panel() {
+        let plot_id = egui::Id::new("overflow-legend-test");
+        let entries = (0..13)
+            .map(|i| (format!("run-{i}"), format!("Run {i}"), egui::Color32::BLUE))
+            .collect::<Vec<_>>();
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(320.0, 200.0))
+            .build_ui(|ui| {
+                assert!(legend_overflows(ui, &entries, &BTreeMap::new(), 160.0));
+                let response = Plot::new("test")
+                    .id(plot_id)
+                    .height(160.0)
+                    .show(ui, |plot| {
+                        for (key, name, color) in &entries {
+                            plot.line(
+                                Line::new(name, vec![[0.0, 0.0], [1.0, 1.0]])
+                                    .color(*color)
+                                    .id(trace_item_id(key)),
+                            );
+                        }
+                    });
+                overflow_legend(
+                    ui,
+                    plot_id,
+                    *response.transform.frame(),
+                    &entries,
+                    &BTreeMap::new(),
+                );
+            });
+        harness.run_steps(3);
+        harness.get_by_label("Legend (13) ⏷").click();
+        harness.run_steps(3);
+        harness.get_by_label("Run 0").click();
+        harness.run_steps(3);
+        let memory = egui_plot::PlotMemory::load(&harness.ctx, plot_id).unwrap();
+        assert!(memory.hidden_items.contains(&trace_item_id("run-0")));
+        assert!(!memory.hidden_items.contains(&trace_item_id("run-1")));
+        assert!(memory.transform().frame().height() <= 160.0);
     }
 }

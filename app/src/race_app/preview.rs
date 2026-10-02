@@ -2,6 +2,7 @@
 use super::super::policy::{format_time, normalized_to_screen, point_in};
 use super::super::{PREVIEW_H, PREVIEW_W};
 use super::{OverlayEditor, PanelAction};
+use crate::ui_kit::widgets;
 use eframe::egui;
 
 impl OverlayEditor {
@@ -134,12 +135,13 @@ impl OverlayEditor {
             }
         }
         ui.horizontal(|ui| {
-            if ui
-                .button(if self.preview_controller.playing {
-                    "⏸"
-                } else {
-                    "▶"
-                })
+            let (glyph, tip) = if self.preview_controller.playing {
+                ("⏸", "Pause (Space)")
+            } else {
+                ("▶", "Play (Space)")
+            };
+            if widgets::primary_button(ui, glyph)
+                .on_hover_text(tip)
                 .clicked()
             {
                 if self.preview_controller.playing {
@@ -150,6 +152,12 @@ impl OverlayEditor {
                 }
             }
             let mut time = self.session.current_time();
+            ui.monospace(format!(
+                "{} / {}",
+                format_time(self.session.current_time()),
+                format_time(self.duration())
+            ));
+            ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(80.0);
             if ui
                 .add(egui::Slider::new(&mut time, 0.0..=self.duration()).show_value(false))
                 .changed()
@@ -159,12 +167,7 @@ impl OverlayEditor {
                 self.request_preview();
                 self.refresh_overlay();
             }
-            ui.monospace(format!(
-                "{} / {}",
-                format_time(self.session.current_time()),
-                format_time(self.duration())
-            ));
-            ui.weak("←/→ frame");
+            ui.weak("◀ ▶ keys step");
         });
     }
 }

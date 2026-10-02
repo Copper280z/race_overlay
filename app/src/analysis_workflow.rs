@@ -34,355 +34,14 @@ pub(super) fn replace_segments_preserving_identity(
     recording.segments = segments;
 }
 
-fn interval_bar(ui: &mut egui::Ui, start: &mut f64, end: &mut f64, bounds: (f64, f64)) -> bool {
-    if !bounds.0.is_finite() || !bounds.1.is_finite() || bounds.1 <= bounds.0 {
-        return false;
-    }
-    ui.small("Drag the endpoints to trim the interval");
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width().max(80.0), 28.0),
-        egui::Sense::drag(),
-    );
-    let x = |t: f64| {
-        rect.left() + ((t - bounds.0) / (bounds.1 - bounds.0)).clamp(0.0, 1.0) as f32 * rect.width()
-    };
-    let stroke = egui::Stroke::new(3.0, ui.visuals().selection.bg_fill);
-    ui.painter().line_segment(
-        [rect.left_center(), rect.right_center()],
-        egui::Stroke::new(2.0, ui.visuals().weak_text_color()),
-    );
-    ui.painter().line_segment(
-        [
-            egui::pos2(x(*start), rect.center().y),
-            egui::pos2(x(*end), rect.center().y),
-        ],
-        stroke,
-    );
-    for t in [*start, *end] {
-        ui.painter().circle_filled(
-            egui::pos2(x(t), rect.center().y),
-            6.0,
-            ui.visuals().selection.stroke.color,
-        );
-    }
-    if response.drag_started()
-        && let Some(p) = response.interact_pointer_pos()
-    {
-        ui.data_mut(|d| {
-            d.insert_temp(
-                response.id,
-                (p.x - x(*start)).abs() <= (p.x - x(*end)).abs(),
-            )
-        });
-    }
-    if response.dragged()
-        && let Some(p) = response.interact_pointer_pos()
-    {
-        let t = bounds.0
-            + ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * (bounds.1 - bounds.0);
-        if ui
-            .data_mut(|d| d.get_temp::<bool>(response.id))
-            .unwrap_or(true)
-        {
-            *start = t.min(*end - 0.001);
-        } else {
-            *end = t.max(*start + 0.001);
-        }
-        return true;
-    }
-    false
-}
-
 impl AnalysisApp {
-    pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Add files…").clicked()
-                && let Some(paths) = rfd::FileDialog::new()
-                    .add_filter(
-                        "Data / video",
-                        &["xrk", "csv", "insv", "lrv", "mp4", "mov", "mkv"],
-                    )
-                    .pick_files()
-            {
-                self.add_paths(paths);
-            }
-            if ui.button("Open workspace…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Workspace / overlay project", &["json"])
-                    .pick_file()
-            {
-                self.open_path(path);
-            }
-            if ui
-                .button(if self.dirty { "Save *" } else { "Save" })
-                .clicked()
-            {
-                self.save(false);
-            }
-            if ui.button("Save as…").clicked() {
-                self.save(true);
-            }
-            ui.menu_button("Panels / layout", |ui| {
-                for (label, kind) in [
-                    ("Channel plot", TabKind::Plot(Default::default())),
-                    ("X/Y scatter plot", TabKind::Scatter(Default::default())),
-                    (
-                        "Delta plot",
-                        TabKind::Plot(PlotOptions {
-                            delta: true,
-                            ..Default::default()
-                        }),
-                    ),
-                    (
-                        "Video",
-                        TabKind::Video(VideoOptions {
-                            slot: 0,
-                            segment: None,
-                            linked: true,
-                            time: 0.0,
-                            unknown: Default::default(),
-                        }),
-                    ),
-                    (
-                        "Course map",
-                        TabKind::Map {
-                            channel: "gps_speed".into(),
-                            settings: Default::default(),
-                        },
-                    ),
-                    (
-                        "GPS imagery",
-                        TabKind::Map {
-                            channel: "gps_speed".into(),
-                            settings: Box::new(MapSettings {
-                                actual_gps: true,
-                                ..Default::default()
-                            }),
-                        },
-                    ),
-                    ("Values / stats", TabKind::Stats),
-                    ("Recordings", TabKind::Browser),
-                    ("Timing / course", TabKind::Setup),
-                ] {
-                    if ui.button(label).clicked() {
-                        let tab = self.tab(kind);
-                        self.dock.push_to_focused_leaf(tab);
-                        self.dirty = true;
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                for (i, label) in ["Quick Compare", "Data Focus", "Video Compare"]
-                    .iter()
-                    .enumerate()
-                {
-                    if ui.button(*label).clicked() {
-                        self.layout(i);
-                        ui.close();
-                    }
-                }
-            });
-            ui.separator();
-            for mode in [XMode::Time, XMode::Course, XMode::Distance] {
-                let label = if mode == XMode::Time
-                    && automatic_alignment_complete(
-                        &self.prepared,
-                        self.workspace.reference.as_ref(),
-                    ) {
-                    "Aligned time"
-                } else {
-                    mode.label()
-                };
-                if ui
-                    .selectable_value(&mut self.state.mode, mode, label)
-                    .changed()
-                {
-                    self.automatic_mode = false;
-                    self.plot_cache.clear();
-                    self.scatter_cache.clear();
-                    self.dirty = true;
-                }
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .button(if self.playing { "Pause" } else { "Play linked" })
-                .clicked()
-            {
-                self.playing = !self.playing;
-            }
-            let duration = self
-                .reference_run()
-                .map_or(1.0, |r| r.end - r.start)
-                .max(0.001);
-            ui.add(
-                egui::Slider::new(&mut self.state.cursor, 0.0..=duration)
-                    .text("Reference elapsed s"),
-            );
-            ui.weak("←/→ frame/sample");
-            if ui.button("Range start").clicked() {
-                self.state
-                    .range
-                    .get_or_insert([self.state.cursor, duration])[0] = self.state.cursor;
-            }
-            if ui.button("Range finish").clicked() {
-                self.state.range.get_or_insert([0.0, self.state.cursor])[1] = self.state.cursor;
-            }
-            if ui.button("Clear range").clicked() {
-                self.state.range = None;
-            }
-            if self.state.mode == XMode::Course && self.prepared.course.is_none() {
-                ui.weak("No reference GPS: showing elapsed time.");
-            }
-        });
-    }
-    pub(super) fn setup(&mut self, ui: &mut egui::Ui) {
-        let mut changed = false;
-        let mut reload = vec![];
-        let mut removed_sources = vec![];
-        let mut extra = None;
-        let mut restore_intervals = false;
-        let mut intervals_replaced = false;
-        egui::ScrollArea::vertical().show(ui,|ui|{
-            ui.label("Intervals use the recording clock, not raw camera time. Video viewers show exported-video time separately.");
-            for recording in &mut self.workspace.recordings {
-                ui.push_id(recording.id.0,|ui|{ui.collapsing(recording.name.clone(),|ui|{
-                    ui.horizontal_wrapped(|ui|{ui.label("Video = recording time +");changed|=ui.add(egui::DragValue::new(&mut recording.video_offset_seconds).speed(0.01).suffix(" s")).changed();});
-                    ui.collapsing("Match one visible event",|ui|{
-                        ui.small("Unlink a video viewer and find a recognizable event. Enter its exported-video time and the same event's recording time. This sets an offset; it does not warp either run.");
-                        let id=ui.id().with("event-pair");let mut pair=ui.data_mut(|d|d.get_temp::<[f64;2]>(id).unwrap_or([0.0,0.0]));
-                        ui.add(egui::DragValue::new(&mut pair[0]).speed(0.01).prefix("Video s "));ui.add(egui::DragValue::new(&mut pair[1]).speed(0.01).prefix("Recording s "));
-                        if ui.button("Apply matching event").clicked(){recording.video_offset_seconds=pair[0]-pair[1];changed=true;}ui.data_mut(|d|d.insert_temp(id,pair));
-                        ui.small("Use the recording's Video alignment section for normal synchronization and camera orientation. Additional timing diagnostics remain available in Overlay.");
-                    });
-                    egui::ComboBox::from_id_salt("primary-source").selected_text(recording.sources.iter().find(|s|s.id==recording.primary_source).map_or("Primary data",|s|s.name.as_str())).show_ui(ui,|ui|{for source in &recording.sources{changed|=ui.selectable_value(&mut recording.primary_source,source.id,&source.name).changed();}});
-                    if ui.button("Detect intervals from primary data").on_hover_text("Replaces this recording's intervals with logger laps or automatic motion detection.").clicked() && let Some(data)=self.data.get(&recording.primary_source) {
-                        let gps=gps_points(&data.raw,recording);let detected=auto_segments(&data.raw,recording,&gps);replace_segments_preserving_identity(recording,detected);changed=true;intervals_replaced=true;
-                    }
-                    for source in &mut recording.sources {ui.push_id(source.id.0,|ui|{
-                        ui.label(&source.name);ui.small(source.path.display().to_string());
-                        if source.adapter=="generic_csv" {ui.collapsing("CSV columns / units (advanced)",|ui|{
-                            ui.small("Default: first row is headers, first column is time in seconds. Configure columns with name, quantity and unit for cross-file comparisons and GPS. Explicit null disables a header/time column.");
-                            let id=ui.id().with("csv-json");
-                            let mut draft=ui.data_mut(|d|d.get_temp::<String>(id)).unwrap_or_else(||serde_json::to_string_pretty(&source.settings).unwrap_or_default());
-                            ui.add(egui::TextEdit::multiline(&mut draft).code_editor().desired_rows(8));
-                            if ui.button("Apply CSV settings & reload").clicked(){match serde_json::from_str::<Value>(&draft) {
-                                Ok(value) if value.is_object() && serde_json::from_value::<overlay_core::adapters::CsvConfig>(value.clone()).is_ok()=>{source.settings=value;reload.push(source.clone());changed=true;},
-                                _=>{self.errors.push("CSV settings must be a valid configuration object; see docs/usage.md.".into());}
-                            }}
-                            ui.data_mut(|d|d.insert_temp(id,draft));
-                        });}
-                        changed|=ui.add(egui::DragValue::new(&mut source.alignment.offset_seconds).speed(0.01).prefix("Source minus recording s ")).changed();
-                        if !source.settings.is_object(){source.settings=json!({});}
-                        let filter_id=ui.id().with("source-filter-draft");
-                        let (mut enabled,mut hz)=ui.data_mut(|d|d.get_temp::<(bool,f64)>(filter_id)).unwrap_or((source.settings.get("low_pass_enabled").and_then(Value::as_bool).unwrap_or(false),source.settings.get("low_pass_hz").and_then(Value::as_f64).unwrap_or(8.0)));
-                        ui.checkbox(&mut enabled,"Source zero-phase low-pass");if enabled{ui.add(egui::DragValue::new(&mut hz).range(0.1..=100.0).suffix(" Hz"));}
-                        if ui.button("Reload & apply").clicked(){source.settings["low_pass_enabled"]=json!(enabled);source.settings["low_pass_hz"]=json!(hz);reload.push(source.clone());changed=true;}
-                        if ui.button("Locate source file…").clicked() && let Some(path)=rfd::FileDialog::new().pick_file(){source.path=path;reload.push(source.clone());changed=true;}
-                        if ui.button("Remove source").on_hover_text("Removes its bindings, not files or other sources.").clicked(){removed_sources.push(source.id);changed=true;}
-                        // Draft controls must not silently change saved processing.
-                        ui.data_mut(|d|d.insert_temp(filter_id,(enabled,hz)));
-                    });}
-                    if ui.button("Attach another telemetry source…").clicked(){extra=Some(recording.id);}
-                    ui.separator();
-                    let offset=recording.sources.iter().find(|s|s.id==recording.primary_source).map_or(0.0,|s|s.alignment.offset_seconds);
-                    let extent=self.data.get(&recording.primary_source).map(|d|d.raw.channels.values().fold((f64::INFINITY,f64::NEG_INFINITY),|(a,b),c|(a.min(c.series.samples.first().map_or(a,|s|s.time-offset)),b.max(c.series.samples.last().map_or(b,|s|s.time-offset)))));
-                    for seg in &mut recording.segments {ui.push_id(seg.id.0,|ui|{
-                        ui.label(&seg.name);let mut start=seg.start_recording_time;let mut end=seg.end_recording_time;
-                        let mut edit=ui.add(egui::DragValue::new(&mut start).speed(0.05).prefix("Start s ")).changed() | ui.add(egui::DragValue::new(&mut end).speed(0.05).prefix("Finish s ")).changed();
-                        if let Some(bounds)=extent {edit|=interval_bar(ui,&mut start,&mut end,bounds);}
-                        if edit && start.is_finite() && end.is_finite() && end>start{seg.start_recording_time=start;seg.end_recording_time=end;seg.estimated=true;changed=true;}
-                        changed|=ui.checkbox(&mut seg.competitive,"Include as competitive").changed();
-                    });}
-                    if ui.button("Add manual interval").clicked(){recording.segments.push(RunSegment{id:SegmentId::new(),name:"Manual interval".into(),start_recording_time:0.0,end_recording_time:60.0,kind:SegmentKind::Unknown,estimated:true,competitive:false,unknown:Default::default()});changed=true;}
-                });});
-            }
-            ui.separator();ui.heading("Optional course gates");ui.small("Scrub the reference to the timing line, then capture its position and travel direction. GPS gate durations are estimates, not official timing-system results.");
-            let capture=self.reference_gate_capture();
-            if let Some((_,name,time,_))=&capture{ui.small(format!("Capture source: {name} at recording {time:.3} s"));}
-            ui.horizontal_wrapped(|ui|{
-                for(i,label)in ["Capture start / circuit gate","Capture finish gate"].iter().enumerate(){if ui.add_enabled(capture.is_some(),egui::Button::new(*label)).clicked(){let gate=capture.as_ref().unwrap().3;if i==0{if self.workspace.course.gates.is_empty(){self.workspace.course.gates.push(gate);}else{self.workspace.course.gates[0]=gate;}}else if self.workspace.course.gates.len()==1{self.workspace.course.gates.push(gate);}else if self.workspace.course.gates.len()>1{self.workspace.course.gates[1]=gate;}changed=true;}}
-                if ui.button("Restore detected intervals").on_hover_text("Replaces gate-created and manually edited intervals with fresh logger-lap or motion detection while preserving the pinned reference when possible.").clicked(){restore_intervals=true;}
-                if ui.add_enabled(!self.workspace.course.gates.is_empty(),egui::Button::new("Clear gates & restore intervals")).clicked(){self.workspace.course.gates.clear();restore_intervals=true;changed=true;}
-            });
-            for (i,gate)in self.workspace.course.gates.iter_mut().enumerate(){ui.horizontal_wrapped(|ui|{ui.label(if i==0{"Start"}else{"Finish"});changed|=ui.add(egui::DragValue::new(&mut gate.latitude).speed(0.00001).max_decimals(7).prefix("Lat ")).changed();changed|=ui.add(egui::DragValue::new(&mut gate.longitude).speed(0.00001).max_decimals(7).prefix("Lon ")).changed();changed|=ui.add(egui::DragValue::new(&mut gate.heading_degrees).speed(0.5).suffix("° heading")).changed();changed|=ui.add(egui::DragValue::new(&mut gate.width_meters).range(1.0..=100.0).suffix(" m width")).changed();});}
-            if ui.add_enabled(!self.workspace.course.gates.is_empty(),egui::Button::new("Apply gates to all recordings")).clicked(){self.apply_gates();changed=true;}
-            ui.collapsing("Manual course-position anchors",|ui|{
-                ui.small("Choose a compared run and give a recording time that corresponds to a known reference-course distance. Anchors affect only that run's GPS matching, not its sensor timestamps.");
-                let mut selected=self.workspace.selected.clone().or_else(||self.state.selection.last().cloned());
-                egui::ComboBox::from_id_salt("anchor-run").selected_text(selected.as_ref().and_then(|k|segment(&self.workspace,k)).map_or("Run",|(_,s)|s.name.as_str())).show_ui(ui,|ui|{for r in &self.prepared.runs{ui.selectable_value(&mut selected,Some(r.key.clone()),&r.name);}});self.workspace.selected=selected.clone();
-                let id=ui.id().with("anchor-pair");let mut pair=ui.data_mut(|d|d.get_temp::<[f64;2]>(id).unwrap_or([0.0,0.0]));
-                ui.add(egui::DragValue::new(&mut pair[0]).speed(0.01).prefix("Run recording s "));ui.add(egui::DragValue::new(&mut pair[1]).speed(0.1).prefix("Reference meters "));
-                if ui.button("Add anchor").clicked() && let Some(key)=selected{self.workspace.course.manual_anchors.push(ManualAnchor{segment:Some(key),recording_time:pair[0],reference_progress:pair[1],unknown:Default::default()});changed=true;}
-                ui.data_mut(|d|d.insert_temp(id,pair));let mut remove=None;for(i,a)in self.workspace.course.manual_anchors.iter().enumerate(){ui.horizontal(|ui|{ui.label(format!("{:.3}s → {:.1}m",a.recording_time,a.reference_progress));if ui.small_button("Remove").clicked(){remove=Some(i);}});}if let Some(i)=remove{self.workspace.course.manual_anchors.remove(i);changed=true;}
-            });
-        });
-        if intervals_replaced {
-            self.retain_valid_selection();
-        }
-        if restore_intervals {
-            self.restore_detected_intervals();
-            changed = true;
-        }
-        for id in removed_sources {
-            self.data.remove(&id);
-            self.loading.remove(&id);
-            let affected_recordings = self
-                .workspace
-                .recordings
-                .iter()
-                .filter(|recording| recording.sources.iter().any(|source| source.id == id))
-                .map(|recording| recording.id)
-                .collect::<Vec<_>>();
-            for recording_id in affected_recordings {
-                self.video_sync.remove_source(recording_id, id);
-            }
-            for r in &mut self.workspace.recordings {
-                r.sources.retain(|s| s.id != id);
-                if r.primary_source == id {
-                    r.primary_source = r.sources.first().map_or_else(SourceId::default, |s| s.id);
-                }
-                if let Some(p) = &mut r.overlay_snapshot {
-                    p.sources.retain(|s| s.id != id);
-                    for widget in &mut p.widgets {
-                        widget.bindings.retain(|b| b.channel.source_id != id);
-                    }
-                }
-            }
-        }
-        for source in reload {
-            self.enqueue(source);
-        }
-        if let Some(id) = extra
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Telemetry", &["xrk", "csv", "insv", "lrv"])
-                .pick_file()
-        {
-            let source = SourceConfig {
-                id: SourceId::new(),
-                name: path
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into(),
-                adapter: adapter_for(&path).into(),
-                path,
-                alignment: Default::default(),
-                settings: json!({}),
-                unknown: Default::default(),
-            };
-            if let Some(r) = self.workspace.recordings.iter_mut().find(|r| r.id == id) {
-                r.sources.push(source.clone());
-            }
-            self.enqueue(source);
-            changed = true;
-        }
-        if changed {
-            self.changed();
-        }
-    }
-    pub(super) fn apply_gates(&mut self) {
-        let gates = &self.workspace.course.gates;
+    /// Replaces each recording's intervals with laps between crossings of the
+    /// single circuit gate. Point-to-point gates never trim intervals; they
+    /// only align runs (see `prepare_comparison`).
+    pub(super) fn split_laps_at_gate(&mut self) {
+        let [gate] = self.workspace.course.gates[..] else {
+            return;
+        };
         let mut matched = 0;
         let mut unmatched = 0;
         for r in &mut self.workspace.recordings {
@@ -390,17 +49,7 @@ impl AnalysisApp {
                 unmatched += 1;
                 continue;
             };
-            let gps = gps_points(&data.raw, r);
-            let starts = gate_crossings(&gps, gates[0]);
-            let pairs = if gates.len() == 1 {
-                starts.windows(2).map(|p| (p[0], p[1])).collect::<Vec<_>>()
-            } else {
-                let ends = gate_crossings(&gps, gates[1]);
-                starts
-                    .into_iter()
-                    .filter_map(|s| ends.iter().copied().find(|e| *e > s + 1.0).map(|e| (s, e)))
-                    .collect()
-            };
+            let pairs = gate_laps(&gps_points(&data.raw, r), gate);
             if pairs.is_empty() {
                 unmatched += 1;
                 continue;
@@ -411,14 +60,10 @@ impl AnalysisApp {
                 .enumerate()
                 .map(|(i, (start, end))| RunSegment {
                     id: SegmentId::new(),
-                    name: format!("GPS run {}", i + 1),
+                    name: format!("GPS lap {}", i + 1),
                     start_recording_time: start,
                     end_recording_time: end,
-                    kind: if gates.len() == 1 {
-                        SegmentKind::Lap
-                    } else {
-                        SegmentKind::Autocross
-                    },
+                    kind: SegmentKind::Lap,
                     estimated: true,
                     competitive: true,
                     unknown: Default::default(),
@@ -430,10 +75,10 @@ impl AnalysisApp {
         self.state.cursor = 0.0;
         self.state.range = None;
         self.message = format!(
-            "Applied gates to {matched} recording(s); {unmatched} without valid directed crossings kept their existing intervals."
+            "Split laps in {matched} recording(s); {unmatched} without two gate crossings kept their intervals."
         );
     }
-    fn restore_detected_intervals(&mut self) {
+    pub(super) fn restore_detected_intervals(&mut self) {
         for recording in &mut self.workspace.recordings {
             let Some(data) = self.data.get(&recording.primary_source) else {
                 continue;
@@ -447,14 +92,23 @@ impl AnalysisApp {
         self.state.range = None;
         self.message = "Restored logger-lap or automatically detected intervals; the analysis range was cleared.".into();
     }
-    pub(super) fn reference_gate_capture(&self) -> Option<(RecordingId, String, f64, Gate)> {
+    /// The gate under the reference run's playhead plus `nudge_seconds`. The
+    /// nudge reaches past the run's own ends, which the playhead cannot.
+    pub(super) fn reference_gate_capture(
+        &self,
+        nudge_seconds: f64,
+    ) -> Option<(RecordingId, String, f64, Gate)> {
         let key = self.workspace.reference.as_ref()?;
         let (recording, interval) = segment(&self.workspace, key)?;
         let data = self.data.get(&recording.primary_source)?;
         let gps = gps_points(&data.raw, recording);
-        let time = interval.start_recording_time + self.state.cursor;
+        let time = interval.start_recording_time + self.state.cursor + nudge_seconds;
         let index = gps.partition_point(|point| point.recording_time < time);
         let point = gps.get(index)?;
+        // Never place a gate from GPS that is not near the requested moment.
+        if (point.recording_time - time).abs() > 2.0 {
+            return None;
+        }
         let (before, after) = if let Some(after) = gps.get(index + 5) {
             (point, after)
         } else {
@@ -478,6 +132,7 @@ impl AnalysisApp {
         match AnalysisDocument::load(&path) {
             Ok(doc) => {
                 self.pause();
+                self.initial_layout_pending = false;
                 self.workspace = doc.workspace().clone();
                 self.state = serde_json::from_value(
                     self.workspace
@@ -490,7 +145,12 @@ impl AnalysisApp {
                 self.dock = serde_json::from_value(self.state.dock.clone())
                     .unwrap_or_else(|_| DockState::new(vec![]));
                 if self.dock.iter_all_tabs().next().is_none() {
-                    self.layout(0);
+                    let has_video = self
+                        .workspace
+                        .recordings
+                        .iter()
+                        .any(|r| r.video_path.is_some());
+                    self.layout(if has_video { 0 } else { 1 });
                 }
                 self.next_tab = self
                     .dock
@@ -527,7 +187,7 @@ impl AnalysisApp {
             },
         }
     }
-    fn save(&mut self, as_new: bool) {
+    pub(super) fn save(&mut self, as_new: bool) {
         let path = if as_new { None } else { self.path.clone() }.or_else(|| {
             rfd::FileDialog::new()
                 .set_file_name("session.race-analysis.json")

@@ -1,5 +1,6 @@
 //! Optional, georeferenced track imagery. Fetching and decoding never run in
 //! the UI thread; the GPS trace and comparison do not depend on this service.
+use crate::ui_kit::{Tone, widgets};
 use egui::{Color32, Pos2, TextureHandle};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -191,6 +192,8 @@ struct LoadedImage {
     image: egui::ColorImage,
     downloaded_bounds: Option<GeoBounds>,
     source_url: Option<String>,
+    /// True when a locally cached image satisfied the request.
+    from_cache: bool,
 }
 
 #[derive(Default)]
@@ -200,6 +203,8 @@ pub struct ImageryController {
     requested_path: Option<PathBuf>,
     pending: Option<Receiver<Result<LoadedImage, String>>>,
     error: Option<String>,
+    /// Non-error status, such as "used a cached image".
+    notice: Option<String>,
     registration_error: Option<String>,
     editing_bounds: Option<GeoBounds>,
     editing_controls: Option<[ControlPoint; 3]>,
@@ -217,6 +222,11 @@ impl ImageryController {
                         config.controls = None;
                         config.attribution = ATTRIBUTION.into();
                         config.source_url = loaded.source_url;
+                        self.notice = Some(if loaded.from_cache {
+                            "Used the locally cached image; nothing was downloaded.".into()
+                        } else {
+                            "Downloaded from USGS and cached for reuse.".into()
+                        });
                     }
                     if config.image_path.as_ref() == Some(&loaded.path) {
                         self.texture = Some(ctx.load_texture(
@@ -245,6 +255,7 @@ impl ImageryController {
                         image,
                         downloaded_bounds: None,
                         source_url: None,
+                        from_cache: false,
                     });
                     let _ = tx.send(result);
                     repaint.request_repaint();
@@ -254,6 +265,88 @@ impl ImageryController {
         }
     }
 
+    /// Download / import / clear buttons plus load status. Shared by the
+    /// inline "add imagery" prompt and the options menu.
+    pub fn quick_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        config: &mut ImageryConfig,
+        course_bounds: Option<GeoBounds>,
+        asset_dir: &Path,
+        show_clear: bool,
+    ) {
+        self.poll(ui.ctx(), config);
+        ui.horizontal_wrapped(|ui| {
+            let valid = course_bounds.is_some_and(|b| b.padded().conus());
+            let mut request = None;
+            if ui.add_enabled(valid && self.pending.is_none(), egui::Button::new("Get US aerial image"))
+                .on_hover_text("Uses a locally cached image of this course when one exists; otherwise downloads it once from USGS and caches it. Continental US only; imagery may predate this event.")
+                .clicked() {
+                request = Some(false);
+            }
+            if config.source_url.is_some()
+                && ui.add_enabled(valid && self.pending.is_none(), egui::Button::new("Re-download"))
+                    .on_hover_text("Ignore the cache and fetch a fresh copy from USGS")
+                    .clicked() {
+                request = Some(true);
+            }
+            if let Some(refresh) = request {
+                let bounds = course_bounds.expect("enabled for bounds").padded();
+                let dir = asset_dir.to_owned();
+                let cache = crate::app_paths::imagery_cache_dir();
+                let repaint = ui.ctx().clone();
+                let (tx,rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let result = fetch_imagery(bounds, &dir, &cache, refresh);
+                    let _ = tx.send(result);
+                    repaint.request_repaint();
+                });
+                self.error = None;
+                self.notice = None;
+                self.pending = Some(rx);
+            }
+            if ui.add_enabled(self.pending.is_none(), egui::Button::new("Import PNG / JPEG…")).clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("Track image", &["png","jpg","jpeg"]).pick_file() {
+                config.image_path = Some(path);
+                config.bounds = None;
+                config.controls = None;
+                config.attribution.clear();
+                config.source_url = None;
+                self.editing_bounds = course_bounds;
+                self.error = None;
+            }
+            if show_clear && ui.button("Clear image").clicked() {
+                // Drop the receiver; an in-flight network request may finish
+                // its bounded download but cannot replace this selection.
+                self.pending = None;
+                self.notice = None;
+                *config = ImageryConfig::default();
+                self.texture = None;
+                self.loaded_path = None;
+                self.requested_path = None;
+            }
+        });
+        if self.pending.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading imagery in the background…");
+            });
+        }
+        if let Some(notice) = &self.notice {
+            widgets::hint(ui, notice.clone());
+        }
+        if let Some(error) = &self.error {
+            widgets::callout(ui, Tone::Bad, error);
+            if ui.button("Retry image load").clicked() {
+                self.requested_path = None;
+            }
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -261,53 +354,17 @@ impl ImageryController {
         course_bounds: Option<GeoBounds>,
         asset_dir: &Path,
     ) {
-        self.poll(ui.ctx(), config);
-        ui.collapsing("Track imagery / offline image", |ui| {
-            ui.small("Optional background. GPS comparison works without imagery or a saved track.");
-            ui.horizontal_wrapped(|ui| {
-                let valid = course_bounds.is_some_and(|b| b.padded().conus());
-                if ui.add_enabled(valid && self.pending.is_none(), egui::Button::new("Download US aerial image"))
-                    .on_hover_text("Downloads the current course area from USGS and saves it locally. Continental US only; imagery may predate this event.")
-                    .clicked() {
-                    let bounds = course_bounds.expect("enabled for bounds").padded();
-                    let dir = asset_dir.to_owned();
-                    let repaint = ui.ctx().clone();
-                    let (tx,rx) = mpsc::channel();
-                    std::thread::spawn(move || {
-                        let result = download_image(bounds, &dir);
-                        let _ = tx.send(result);
-                        repaint.request_repaint();
-                    });
-                    self.error = None;
-                    self.pending = Some(rx);
-                }
-                if ui.add_enabled(self.pending.is_none(), egui::Button::new("Import PNG / JPEG…")).clicked()
-                    && let Some(path) = rfd::FileDialog::new().add_filter("Track image", &["png","jpg","jpeg"]).pick_file() {
-                    config.image_path = Some(path);
-                    config.bounds = None;
-                    config.controls = None;
-                    config.attribution.clear();
-                    config.source_url = None;
-                    self.editing_bounds = course_bounds;
-                    self.error = None;
-                }
-                if ui.button("Clear image").clicked() {
-                    // Drop the receiver; an in-flight network request may finish
-                    // its bounded download but cannot replace this selection.
-                    self.pending = None;
-                    *config = ImageryConfig::default();
-                    self.texture = None;
-                    self.loaded_path = None;
-                    self.requested_path = None;
-                }
-            });
-            if self.pending.is_some() { ui.spinner(); ui.label("Loading imagery in the background…"); }
-            if let Some(error) = &self.error {
-                ui.colored_label(Color32::LIGHT_RED,error);
-                if ui.button("Retry image load").clicked() { self.requested_path = None; }
+        widgets::section_label(ui, "Track imagery");
+        widgets::hint(
+            ui,
+            "Optional background. GPS comparison works without imagery or a saved track.",
+        );
+        self.quick_actions(ui, config, course_bounds, asset_dir, true);
+        {
+            if let Some(path) = &config.image_path {
+                ui.small(path.display().to_string());
             }
-            if let Some(path) = &config.image_path { ui.small(path.display().to_string()); }
-            ui.add(egui::Slider::new(&mut config.opacity,0.0..=1.0).text("Imagery opacity"));
+            ui.add(egui::Slider::new(&mut config.opacity, 0.0..=1.0).text("Imagery opacity"));
             if config.image_path.is_some() {
                 ui.collapsing("Register image: geographic bounds", |ui| {
                     let bounds = self.editing_bounds.get_or_insert(config.bounds.or(course_bounds).unwrap_or(GeoBounds {
@@ -366,11 +423,17 @@ impl ImageryController {
                         }
                     }
                 });
-                if let Err(error)=Registration::from_config(config) { ui.colored_label(Color32::YELLOW,error); }
-                if let Some(error)=&self.registration_error { ui.colored_label(Color32::LIGHT_RED,error); }
+                if let Err(error) = Registration::from_config(config) {
+                    widgets::callout(ui, Tone::Warn, error);
+                }
+                if let Some(error) = &self.registration_error {
+                    widgets::callout(ui, Tone::Bad, error);
+                }
             }
-            if !config.attribution.is_empty() {ui.small(&config.attribution);}
-        });
+            if !config.attribution.is_empty() {
+                ui.small(&config.attribution);
+            }
+        }
     }
 
     pub fn paint(
@@ -529,7 +592,7 @@ fn download_image(bounds: GeoBounds, dir: &Path) -> Result<LoadedImage, String> 
     }
     let image = decode_image(&bytes)?;
     fs::create_dir_all(dir).map_err(|e| format!("Cannot create imagery folder: {e}"))?;
-    let path = dir.join(format!("usgs-{}.png", uuid::Uuid::new_v4()));
+    let path = dir.join(format!("{}.png", cache_key(bounds)));
     fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
     let metadata = serde_json::json!({"bounds":actual,"attribution":ATTRIBUTION,"source_url":url});
@@ -543,7 +606,121 @@ fn download_image(bounds: GeoBounds, dir: &Path) -> Result<LoadedImage, String> 
         image,
         downloaded_bounds: Some(actual),
         source_url: Some(url),
+        from_cache: false,
     })
+}
+
+/// Requested area rounded outward to a ~100 m grid, so nearby requests for the
+/// same venue map to the same cache entry.
+fn snapped(bounds: GeoBounds) -> GeoBounds {
+    const GRID: f64 = 0.001;
+    GeoBounds {
+        west: (bounds.west / GRID).floor() * GRID,
+        south: (bounds.south / GRID).floor() * GRID,
+        east: (bounds.east / GRID).ceil() * GRID,
+        north: (bounds.north / GRID).ceil() * GRID,
+    }
+}
+
+fn cache_key(bounds: GeoBounds) -> String {
+    let milli = |value: f64| (value * 1000.0).round() as i64;
+    format!(
+        "usgs-w{}-s{}-e{}-n{}",
+        milli(bounds.west),
+        milli(bounds.south),
+        milli(bounds.east),
+        milli(bounds.north)
+    )
+}
+
+struct CachedImage {
+    png: PathBuf,
+    bounds: GeoBounds,
+    source_url: Option<String>,
+}
+
+fn area(bounds: GeoBounds) -> f64 {
+    (bounds.east - bounds.west) * (bounds.north - bounds.south)
+}
+
+/// The smallest cached image that fully covers `wanted` without being so much
+/// larger that its resolution would be poor for the course.
+fn find_cached(cache_dir: &Path, wanted: GeoBounds) -> Option<CachedImage> {
+    fs::read_dir(cache_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".image.json"))
+        .filter_map(|entry| {
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            let bounds: GeoBounds = serde_json::from_value(metadata.get("bounds")?.clone()).ok()?;
+            let png = entry.path().with_file_name(
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .replace(".image.json", ".png"),
+            );
+            let covers = bounds.valid()
+                && bounds.west <= wanted.west
+                && bounds.east >= wanted.east
+                && bounds.south <= wanted.south
+                && bounds.north >= wanted.north
+                && area(bounds) <= area(wanted) * 4.0;
+            (covers && png.is_file()).then(|| CachedImage {
+                png,
+                bounds,
+                source_url: metadata
+                    .get("source_url")
+                    .and_then(|url| url.as_str())
+                    .map(str::to_owned),
+            })
+        })
+        .min_by(|a, b| area(a.bounds).total_cmp(&area(b.bounds)))
+}
+
+/// Copies a cached image (and its metadata) beside the workspace so saved
+/// workspaces keep working without the cache. Returns the workspace copy.
+fn install_asset(source: &Path, asset_dir: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(asset_dir).map_err(|e| format!("Cannot create imagery folder: {e}"))?;
+    let name = source.file_name().ok_or("Invalid imagery path")?;
+    let destination = asset_dir.join(name);
+    let same = fs::canonicalize(&destination)
+        .ok()
+        .zip(fs::canonicalize(source).ok())
+        .is_some_and(|(a, b)| a == b);
+    if !same {
+        fs::copy(source, &destination).map_err(|e| e.to_string())?;
+        let _ = fs::copy(
+            source.with_extension("image.json"),
+            destination.with_extension("image.json"),
+        );
+    }
+    fs::canonicalize(destination).map_err(|e| e.to_string())
+}
+
+/// Returns imagery for `bounds`: from the local cache when it has a suitable
+/// image (unless `refresh`), otherwise downloaded once and cached.
+fn fetch_imagery(
+    bounds: GeoBounds,
+    asset_dir: &Path,
+    cache_dir: &Path,
+    refresh: bool,
+) -> Result<LoadedImage, String> {
+    let wanted = snapped(bounds);
+    if !refresh && let Some(hit) = find_cached(cache_dir, wanted) {
+        let path = install_asset(&hit.png, asset_dir)?;
+        let image = load_image(&path)?;
+        return Ok(LoadedImage {
+            path,
+            image,
+            downloaded_bounds: Some(hit.bounds),
+            source_url: hit.source_url,
+            from_cache: true,
+        });
+    }
+    let mut loaded = download_image(wanted, cache_dir)?;
+    loaded.path = install_asset(&loaded.path, asset_dir)?;
+    Ok(loaded)
 }
 
 #[cfg(test)]
@@ -567,6 +744,66 @@ mod tests {
         assert!(result.downloaded_bounds.unwrap().valid());
         assert!(!result.image.pixels.is_empty());
     }
+    fn bounds(west: f64, south: f64, east: f64, north: f64) -> GeoBounds {
+        GeoBounds {
+            west,
+            south,
+            east,
+            north,
+        }
+    }
+
+    fn cache_entry(dir: &Path, key: &str, actual: GeoBounds) {
+        fs::write(dir.join(format!("{key}.png")), b"png").unwrap();
+        let metadata = serde_json::json!({"bounds": actual, "source_url": "https://example.test"});
+        fs::write(
+            dir.join(format!("{key}.image.json")),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn snapping_expands_outward_and_is_stable() {
+        let s = snapped(bounds(-77.7074, 42.8912, -77.7041, 42.8938));
+        assert!(s.west <= -77.7074 && s.east >= -77.7041);
+        assert!(s.south <= 42.8912 && s.north >= 42.8938);
+        assert_eq!(snapped(s), s);
+        assert_eq!(
+            cache_key(s),
+            cache_key(snapped(bounds(-77.7079, 42.8911, -77.7042, 42.8939)))
+        );
+    }
+
+    #[test]
+    fn cache_reuses_a_covering_image_and_ignores_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = bounds(-77.71, 42.89, -77.70, 42.90);
+        cache_entry(dir.path(), "usgs-a", cached);
+        // Inside the cached area: hit.
+        let inside = bounds(-77.709, 42.8905, -77.701, 42.8995);
+        assert_eq!(find_cached(dir.path(), inside).unwrap().bounds, cached);
+        // Partly outside: miss.
+        assert!(find_cached(dir.path(), bounds(-77.72, 42.891, -77.704, 42.895)).is_none());
+        // A tiny course inside a huge cached image would be low resolution.
+        assert!(find_cached(dir.path(), bounds(-77.7050, 42.8950, -77.7040, 42.8960)).is_none());
+        // Missing image file: miss.
+        fs::remove_file(dir.path().join("usgs-a.png")).unwrap();
+        assert!(find_cached(dir.path(), inside).is_none());
+    }
+
+    #[test]
+    fn cached_image_is_copied_beside_the_workspace() {
+        let cache = tempfile::tempdir().unwrap();
+        let assets = tempfile::tempdir().unwrap();
+        cache_entry(cache.path(), "usgs-a", bounds(-77.71, 42.89, -77.70, 42.90));
+        let installed = install_asset(&cache.path().join("usgs-a.png"), assets.path()).unwrap();
+        assert!(installed.starts_with(fs::canonicalize(assets.path()).unwrap()));
+        assert!(installed.with_extension("image.json").is_file());
+        // Installing from its own folder is a no-op rather than a self-copy.
+        assert!(install_asset(&installed, assets.path()).is_ok());
+    }
+
     #[test]
     fn geographic_round_trip() {
         for (lat, lon) in [(42.712, -76.88), (0.0, 0.0), (-33.8, 151.2)] {

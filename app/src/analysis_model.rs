@@ -8,16 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
 
-pub(super) const COLORS: [egui::Color32; 8] = [
-    egui::Color32::from_rgb(65, 170, 255),
-    egui::Color32::from_rgb(255, 156, 66),
-    egui::Color32::from_rgb(70, 210, 145),
-    egui::Color32::from_rgb(210, 110, 255),
-    egui::Color32::from_rgb(250, 215, 60),
-    egui::Color32::from_rgb(70, 215, 220),
-    egui::Color32::from_rgb(250, 105, 140),
-    egui::Color32::from_rgb(180, 190, 255),
-];
 pub(super) const DELTA_CHANNEL: &str = "delta_time";
 pub(super) const DELTA_LABEL: &str = "Time delta — positive is slower";
 
@@ -166,6 +156,7 @@ pub(super) struct UiState {
     pub(super) range: Option<[f64; 2]>,
     pub(super) dock: Value,
     pub(super) selected_recording: Option<RecordingId>,
+    pub(super) stats_columns: BTreeMap<u64, [f32; 5]>,
     #[serde(flatten)]
     pub(super) unknown: BTreeMap<String, Value>,
 }
@@ -197,6 +188,8 @@ pub(super) struct VideoRuntime {
     pub(super) decoder: VideoPreview,
     pub(super) texture: Option<egui::TextureHandle>,
     pub(super) requested: Option<(f64, u32, u32)>,
+    /// When the frame now being decoded was asked for, until it arrives.
+    pub(super) awaiting_since: Option<std::time::Instant>,
     pub(super) processing: Option<overlay_core::VideoProcessingConfig>,
     pub(super) error: Option<String>,
 }
@@ -206,6 +199,12 @@ pub(super) struct PlotTrace {
     pub(super) name: String,
     pub(super) color: egui::Color32,
     pub(super) points: Vec<Vec<[f64; 2]>>,
+    /// Per piece: whether it lies before the start gate or after the finish
+    /// gate, outside the measured run.
+    pub(super) outside_gates: Vec<bool>,
+    /// Smallest and largest x over every piece, so a plot can keep showing the
+    /// whole run even though it is only handed the part in view.
+    pub(super) x_range: Option<[f64; 2]>,
     pub(super) unit: Unit,
 }
 

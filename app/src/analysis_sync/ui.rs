@@ -1,6 +1,7 @@
 //! Recording-local video alignment presentation.
 use super::super::*;
 use super::*;
+use crate::ui_kit::{Tone, widgets};
 
 impl AnalysisApp {
     pub(in crate::analysis_app) fn video_alignment_ui(
@@ -18,9 +19,9 @@ impl AnalysisApp {
         else {
             return;
         };
-        let Some(video) = recording.video_path.as_ref() else {
+        if recording.video_path.is_none() {
             return;
-        };
+        }
         let camera_source = recording
             .sources
             .iter()
@@ -33,22 +34,20 @@ impl AnalysisApp {
             metadata.applied || acceptable_primary_audio
         });
         let mut add_camera = false;
+        let mut add_log = false;
+        let mut manual_video_offset = None;
         let mut accept_audio_alignment = false;
         let mut retry_audio = None;
         let mut estimate = false;
         let mut apply = false;
         egui::CollapsingHeader::new(if alignment_complete {
-            "Video alignment ✓"
+            "Video alignment ✔"
         } else {
             "Video alignment"
         })
         .id_salt((recording.id.0, "video-alignment"))
         .default_open(!alignment_complete)
         .show(ui, |ui| {
-            ui.small(format!(
-                "Video: {}",
-                video.file_name().unwrap_or_default().to_string_lossy()
-            ));
             let Some(camera_source) = camera_source.as_ref() else {
                 ui.label("Add the matching camera telemetry to align this video to the logger.");
                 if ui.button("Add camera telemetry…").clicked() {
@@ -56,7 +55,13 @@ impl AnalysisApp {
                 }
                 return;
             };
-            ui.small(format!("Camera telemetry: {}", camera_source.name));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("Camera telemetry: {}", camera_source.name))
+                        .small(),
+                )
+                .truncate(),
+            );
             let metadata = CameraVideoSyncMetadata::read(&camera_source.settings);
             let audio_offset = metadata.camera_minus_video_seconds;
             self.camera_calibration_ui(
@@ -81,7 +86,7 @@ impl AnalysisApp {
                 .recording(recording.id)
                 .and_then(|state| state.audio_results.get(&camera_source.id))
             {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                widgets::callout(ui, Tone::Bad, error);
                 if ui
                     .add_enabled(tools.is_some(), egui::Button::new("Retry audio alignment"))
                     .clicked()
@@ -92,9 +97,7 @@ impl AnalysisApp {
             }
             let Some(audio_offset) = audio_offset else {
                 if tools.is_none() {
-                    ui.colored_label(
-                        egui::Color32::LIGHT_RED,
-                        "FFmpeg and FFprobe were not found. Install them, then relaunch Race Overlay.",
+                    widgets::callout(ui, Tone::Bad, "FFmpeg and FFprobe were not found. Install them, then relaunch Race Overlay.",
                     );
                 } else {
                     ui.spinner();
@@ -109,15 +112,20 @@ impl AnalysisApp {
             ));
             if recording.primary_source == camera_source.id {
                 if alignment_complete {
-                    ui.colored_label(egui::Color32::LIGHT_GREEN, "Video alignment complete.");
+                    widgets::callout(ui, Tone::Good, "Video alignment complete.");
                 } else {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "The audio match is weak; inspect the timing before accepting it.",
+                    widgets::callout(ui, Tone::Warn, "The audio match is weak; inspect the timing before accepting it.",
                     );
                     if ui.button("Accept current audio match").clicked() {
                         accept_audio_alignment = true;
                     }
+                }
+                widgets::hint(
+                    ui,
+                    "To compare this video with a data logger, add the log here; it is synchronized to the video automatically.",
+                );
+                if ui.button("Add data log…").clicked() {
+                    add_log = true;
                 }
                 return;
             }
@@ -133,9 +141,7 @@ impl AnalysisApp {
                     camera_choices.first()?.0.clone(),
                 ))
             }) else {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "No dense continuous channel pair is available for correlation.",
+                widgets::callout(ui, Tone::Warn, "No dense continuous channel pair is available for correlation.",
                 );
                 return;
             };
@@ -155,6 +161,8 @@ impl AnalysisApp {
                     .find(|(reference, _)| reference == selected)
                     .map_or("Choose channel", |(_, label)| label.as_str());
                 egui::ComboBox::from_id_salt(id)
+                    .width((ui.available_width() - 8.0).max(80.0))
+                    .truncate()
                     .selected_text(format!("{label}: {selected_label}"))
                     .show_ui(ui, |ui| {
                         for (reference, label) in choices {
@@ -225,9 +233,7 @@ impl AnalysisApp {
                             candidate.result.sample_count
                         ));
                         if candidate.result.correlation_coefficient.abs() < 0.5 {
-                            ui.colored_label(
-                                egui::Color32::YELLOW,
-                                "Weak correlation; choose more comparable channels before applying.",
+                            widgets::callout(ui, Tone::Warn, "Weak correlation; choose more comparable channels before applying.",
                             );
                         }
                         if ui.button("Apply video alignment").clicked() {
@@ -235,42 +241,42 @@ impl AnalysisApp {
                         }
                     }
                     Err(error) => {
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                        widgets::callout(ui, Tone::Bad, error);
                     }
                 }
             }
             ui.small("Applying preserves the logger clock, so existing intervals and gates do not need to be rebuilt.");
+            ui.collapsing("Set the offset by hand", |ui| {
+                widgets::hint(
+                    ui,
+                    "Video time = logger time + offset. Use this when the automatic match is wrong or unavailable; it also moves the camera's telemetry with the video.",
+                );
+                let mut offset = recording.video_offset_seconds;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut offset)
+                            .speed(0.01)
+                            .prefix("Video offset ")
+                            .suffix(" s"),
+                    )
+                    .changed()
+                {
+                    manual_video_offset = Some(offset);
+                }
+            });
         });
         if add_camera
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("Camera telemetry", &["lrv", "insv"])
                 .pick_file()
         {
-            let source = SourceConfig {
-                id: SourceId::new(),
-                name: path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Camera telemetry")
-                    .into(),
-                adapter: adapter_for(&path).into(),
-                path,
-                alignment: Default::default(),
-                settings: json!({}),
-                unknown: Default::default(),
-            };
-            if let Some(target) = self
-                .workspace
-                .recordings
-                .iter_mut()
-                .find(|target| target.id == recording.id)
-            {
-                target.sources.push(source.clone());
-            }
-            self.enqueue(source);
-            self.message =
-                "Loading camera telemetry; audio alignment will start automatically.".into();
-            self.changed();
+            self.attach_source(recording.id, path);
+        }
+        if add_log {
+            self.attach_data_log_dialog(recording.id);
+        }
+        if let Some(offset) = manual_video_offset {
+            self.set_video_offset_by_hand(recording.id, offset);
         }
         if let Some(source_id) = retry_audio {
             self.video_sync

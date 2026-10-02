@@ -3,43 +3,92 @@ use super::super::policy::{
     dataset_duration, forward_axis_label, set_source_low_pass_settings, source_low_pass_settings,
 };
 use super::{OverlayEditor, PanelAction};
-use eframe::egui;
+use crate::ui_kit::{Tone, theme::text, widgets};
+use eframe::egui::{self, RichText};
 use overlay_core::{ChannelRef, SourceId, builtin_adapter_capabilities};
 
 impl OverlayEditor {
     pub(in crate::race_app) fn sources_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Data sources");
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("+ Camera telemetry").clicked() {
-                self.add_file_source("insta360");
-            }
-            if ui.button("+ CSV").clicked() {
-                self.add_file_source("generic_csv");
-            }
-            if ui.button("+ MyChron XRK").clicked() {
-                self.add_file_source("aim_xrk");
-            }
-            if ui.button("+ Synthetic").clicked() {
-                self.add_synthetic();
-            }
+        let has_project = self.session.has_project();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Data sources")
+                    .strong()
+                    .size(15.0)
+                    .color(text::strong()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(has_project, |ui| {
+                    widgets::action_menu(ui, "Add ⏷", |ui| {
+                        for (label, adapter) in [
+                            ("Camera telemetry (LRV / INSV)", "insta360"),
+                            ("CSV file", "generic_csv"),
+                            ("MyChron XRK", "aim_xrk"),
+                        ] {
+                            if widgets::menu_item(ui, label, None) {
+                                self.add_file_source(adapter);
+                                ui.close();
+                            }
+                        }
+                        if widgets::menu_item(ui, "Synthetic test data", None) {
+                            self.add_synthetic();
+                            ui.close();
+                        }
+                    });
+                });
+            });
         });
+        if !has_project {
+            widgets::empty_state(
+                ui,
+                "No video open",
+                "Open a video first, then add the telemetry that belongs to it.",
+                |ui| {
+                    if widgets::primary_button(ui, "Open video…").clicked() {
+                        self.open_video();
+                    }
+                },
+            );
+            return;
+        }
         let sources = self
             .project()
             .map(|p| p.sources.clone())
             .unwrap_or_default();
+        if sources.is_empty() {
+            widgets::hint(
+                ui,
+                "No telemetry yet. Use Add to attach camera data, a CSV, or an XRK log.",
+            );
+        }
         for source in &sources {
             let loaded = self
                 .session
                 .datasets()
                 .iter()
                 .any(|d| d.source_id == source.id);
-            if ui
-                .selectable_label(
-                    self.source_editor.selected_source == Some(source.id),
-                    format!("{} {}", if loaded { "●" } else { "○" }, source.name),
-                )
-                .clicked()
-            {
+            let selected = self.source_editor.selected_source == Some(source.id);
+            let response = widgets::list_row(ui, selected, |ui| {
+                ui.horizontal(|ui| {
+                    widgets::dot(
+                        ui,
+                        if loaded {
+                            Tone::Good.color()
+                        } else {
+                            text::weak()
+                        },
+                    );
+                    ui.label(RichText::new(&source.name).color(text::strong()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        widgets::chip(
+                            ui,
+                            if loaded { "loaded" } else { "loading" },
+                            if loaded { Tone::Good } else { Tone::Neutral },
+                        );
+                    });
+                });
+            });
+            if response.response.clicked() {
                 self.apply_panel_action(PanelAction::SelectSource(source.id));
                 self.source_editor.remove_source_confirm = None;
                 self.invalidate_correlation();
@@ -48,35 +97,18 @@ impl OverlayEditor {
         let mut remove_source = None;
         if let Some(source_id) = self.source_editor.selected_source {
             if let Some(source) = sources.iter().find(|source| source.id == source_id) {
-                ui.separator();
-                ui.label(format!("Adapter: {}", source.adapter));
+                ui.add_space(6.0);
+                widgets::section_label(ui, &format!("{} settings", source.name));
+                widgets::hint(ui, format!("Adapter: {}", source.adapter));
                 if !source.path.as_os_str().is_empty() {
-                    ui.small(source.path.display().to_string());
-                }
-                if ui
-                    .button(format!("Remove source \u{201c}{}\u{201d}", source.name))
-                    .clicked()
-                {
-                    self.source_editor.remove_source_confirm = Some(source.id);
-                }
-                if self.source_editor.remove_source_confirm == Some(source.id) {
-                    ui.group(|ui| {
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
-                            format!(
-                                "Remove \u{201c}{}\u{201d}? Its telemetry, plot selections, sync state, and widget bindings will be removed; the video and widgets stay.",
-                                source.name
-                            ),
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.button("Remove selected source").clicked() {
-                                remove_source = Some(source.id);
-                            }
-                            if ui.button("Keep source").clicked() {
-                                self.source_editor.remove_source_confirm = None;
-                            }
-                        });
-                    });
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(source.path.display().to_string())
+                                .small()
+                                .color(text::weak()),
+                        )
+                        .truncate(),
+                    );
                 }
                 if source.adapter == "aim_xrk"
                     && let Some(dataset) = self
@@ -107,8 +139,9 @@ impl OverlayEditor {
                 if source_duration.is_some_and(|duration| {
                     duration > self.duration() + 5.0 && source.alignment.offset_seconds.abs() < 1.0
                 }) {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
+                    widgets::callout(
+                        ui,
+                        Tone::Warn,
                         if syncing {
                             "Aligning the raw recording to the exported video…"
                         } else {
@@ -142,7 +175,7 @@ impl OverlayEditor {
                         self.invalidate_correlation();
                         self.refresh_overlay();
                     }
-                    ui.small(format!("Video 0.000 s → raw source {offset:.3} s"));
+                    ui.small(format!("Video 0.000 s = raw source {offset:.3} s"));
                     ui.checkbox(
                         &mut self.source_editor.calibration_source_time,
                         "Calibration interval uses raw source time",
@@ -151,6 +184,7 @@ impl OverlayEditor {
                 let (mut low_pass_enabled, mut low_pass_hz) =
                     source_low_pass_settings(&source.settings);
                 let mut low_pass_changed = false;
+                let mut apply_smoothing = false;
                 ui.collapsing("Source low-pass (all imported continuous channels)", |ui| {
                     if capabilities.camera_telemetry {
                         ui.small("Zero-phase, non-causal smoothing before camera-derived signals are calculated. Discrete channels are unchanged.");
@@ -170,6 +204,7 @@ impl OverlayEditor {
                             )
                             .changed();
                     }
+                    apply_smoothing = ui.button("Reload & apply source smoothing").clicked();
                 });
                 if low_pass_changed && let Some(config) = self.session.source_mut(source_id) {
                     set_source_low_pass_settings(
@@ -180,11 +215,35 @@ impl OverlayEditor {
                     self.status =
                         "Source smoothing changed; click Reload & apply source smoothing".into();
                 }
-                if ui.button("Reload & apply source smoothing").clicked() {
+                if apply_smoothing {
                     self.apply_source_low_pass(source.id);
                 }
                 if !capabilities.camera_telemetry {
                     self.correlation_ui(ui, source.id);
+                }
+                ui.add_space(8.0);
+                if self.source_editor.remove_source_confirm != Some(source.id)
+                    && widgets::danger_button(ui, "Remove source…").clicked()
+                {
+                    self.source_editor.remove_source_confirm = Some(source.id);
+                }
+                if self.source_editor.remove_source_confirm == Some(source.id) {
+                    widgets::callout(
+                        ui,
+                        Tone::Warn,
+                        format!(
+                            "Remove \u{201c}{}\u{201d}? Its telemetry, plot selections, sync state, and widget bindings will be removed; the video and widgets stay.",
+                            source.name
+                        ),
+                    );
+                    ui.horizontal(|ui| {
+                        if widgets::danger_button(ui, "Remove source").clicked() {
+                            remove_source = Some(source.id);
+                        }
+                        if ui.button("Keep").clicked() {
+                            self.source_editor.remove_source_confirm = None;
+                        }
+                    });
                 }
             }
             if let Some(source) = sources.iter().find(|item| item.id == source_id)
@@ -249,9 +308,7 @@ impl OverlayEditor {
                 );
                 ui.small("Zero-phase, non-causal smoothing during calibration for derived longitudinal, lateral, and vertical G; combined G uses those results. The displayed cutoff is the final two-pass -3 dB point. Turn-rate channels are unchanged.");
                 if source_low_pass_settings(&source.settings).0 {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Source smoothing is also enabled, so the two smoothing stages cascade for derived G.",
+                    widgets::callout(ui, Tone::Warn, "Source smoothing is also enabled, so the two smoothing stages cascade for derived G.",
                     );
                 }
                 if ui.button("Apply calibration & recalculate derived G").clicked() {
@@ -464,15 +521,11 @@ impl OverlayEditor {
                     }
                 });
             if target_sample_count.is_some_and(|count| count < 2) {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "The selected target channel has fewer than two samples; choose a recorded sensor channel.",
+                widgets::callout(ui, Tone::Warn, "The selected target channel has fewer than two samples; choose a recorded sensor channel.",
                 );
             }
             if reference_sample_count.is_some_and(|count| count < 24) {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "The selected reference channel has fewer than 24 samples; choose a denser sensor channel.",
+                widgets::callout(ui, Tone::Warn, "The selected reference channel has fewer than 24 samples; choose a denser sensor channel.",
                 );
             }
             if ui
@@ -556,7 +609,7 @@ impl OverlayEditor {
             {
                 ui.group(|ui| {
                     ui.label(format!(
-                        "Candidate: current target {:+.3}s → {:+.3}s",
+                        "Candidate: current target {:+.3}s, proposed {:+.3}s",
                         estimate.target_current_offset_seconds,
                         estimate.target_offset_seconds
                     ));

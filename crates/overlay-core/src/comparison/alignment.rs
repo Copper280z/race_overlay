@@ -132,18 +132,11 @@ fn correlate_distance_series(
     .filter(|result| result.target_minus_reference_seconds.abs() < search * 0.8)
 }
 
-fn distance_anchor_time(samples: &[ProgressSample], distance: f64) -> Option<f64> {
-    if distance.abs() > 1e-6 {
-        return time_at_progress(samples, distance);
-    }
-    samples
-        .iter()
-        .take_while(|sample| sample.progress.abs() <= 1e-6)
-        .filter(|sample| sample.confidence > 0.0)
-        .map(|sample| sample.recording_time)
-        .last()
-        .or_else(|| time_at_progress(samples, distance))
-}
+/// Matched runs are timed where each has travelled this far past the matched
+/// distance. Traveled distance creeps while a car is staged (GPS and speed
+/// noise), so "still at zero" would land anywhere in the staging; passing a
+/// metre marks the departure itself.
+const DEPARTURE_METERS: f64 = 1.0;
 
 fn spatial_time_alignment(
     workspace: &AnalysisWorkspace,
@@ -196,8 +189,10 @@ fn spatial_time_alignment(
             let distance_offset = result.target_minus_reference_seconds;
             let reference_distance = (-distance_offset).max(0.0);
             let target_distance = reference_distance + distance_offset;
-            let reference_time = distance_anchor_time(&reference.distance, reference_distance)?;
-            let target_time = distance_anchor_time(&target.distance, target_distance)?;
+            let reference_time =
+                time_at_progress(&reference.distance, reference_distance + DEPARTURE_METERS)?;
+            let target_time =
+                time_at_progress(&target.distance, target_distance + DEPARTURE_METERS)?;
             let reference_elapsed = reference_time - reference.start;
             let target_elapsed = target_time - target.start;
             let maximum_anchor_elapsed = 15.0_f64
@@ -474,12 +469,101 @@ fn onset_time_alignment(
     })
 }
 
+/// Standing starts are timed where each run has traveled this far from rest:
+/// past the distance that creeps while staged, near where timing begins, and
+/// short enough that differing launches still show.
+const STANDING_START_METERS: f64 = 3.0;
+
+/// Whether the run is stationary for its first second: a standing start.
+fn starts_at_rest(run: &PreparedComparisonRun) -> bool {
+    time_at_progress(&run.distance, 0.5).is_some_and(|time| time - run.start >= 1.0)
+}
+
+/// Standing starts from a shared staging spot: time each run where it has
+/// traveled the same short distance from rest. Traveled distance comes from
+/// speed, so unlike GPS position it does not drift between runs; on the
+/// supplied autocross logs, GPS position drifted several metres.
+fn launch_time_alignment(
+    reference: &PreparedComparisonRun,
+    target: &PreparedComparisonRun,
+) -> Option<ComparisonTimeAlignment> {
+    if !starts_at_rest(reference) || !starts_at_rest(target) {
+        return None;
+    }
+    let launched = |run: &PreparedComparisonRun| {
+        Some(time_at_progress(&run.distance, STANDING_START_METERS)? - run.start)
+    };
+    Some(ComparisonTimeAlignment {
+        offset_seconds: launched(reference)? - launched(target)?,
+        coefficient: None,
+        channel: "standing start",
+        distance_offset_meters: None,
+    })
+}
+
 pub(super) fn best_effort_time_alignment(
     workspace: &AnalysisWorkspace,
     reference: &PreparedComparisonRun,
     target: &PreparedComparisonRun,
     data: &HashMap<SourceId, AnalysisSourceData>,
 ) -> Option<ComparisonTimeAlignment> {
-    spatial_time_alignment(workspace, reference, target, data)
+    launch_time_alignment(reference, target)
+        .or_else(|| spatial_time_alignment(workspace, reference, target, data))
         .or_else(|| onset_time_alignment(workspace, reference, target, data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run sampled at 10 Hz for 40 s whose traveled distance creeps a
+    /// little while staged, then grows at `speed` from `delay`.
+    fn run(delay: f64, speed: f64) -> PreparedComparisonRun {
+        let distance = (0..=400)
+            .map(|index| {
+                let time = index as f64 * 0.1;
+                ProgressSample {
+                    recording_time: time,
+                    progress: time.min(delay) * 0.01 + ((time - delay) * speed).max(0.0),
+                    confidence: 1.0,
+                }
+            })
+            .collect();
+        PreparedComparisonRun {
+            key: SegmentRef {
+                recording_id: RecordingId::new(),
+                segment_id: SegmentId::new(),
+            },
+            name: "run".into(),
+            start: 0.0,
+            end: 40.0,
+            gps: vec![],
+            distance,
+            progress: vec![],
+            time_alignment: None,
+            start_gate: None,
+            finish_gate: None,
+        }
+    }
+
+    #[test]
+    fn standing_starts_are_timed_at_the_same_distance_from_rest() {
+        let reference = run(1.5, 5.0);
+        let target = run(3.5, 4.0);
+
+        let alignment = launch_time_alignment(&reference, &target).unwrap();
+
+        let launched =
+            |delay: f64, speed: f64| delay + (STANDING_START_METERS - delay * 0.01) / speed;
+        assert_eq!(alignment.channel, "standing start");
+        assert!(
+            (alignment.offset_seconds - (launched(1.5, 5.0) - launched(3.5, 4.0))).abs() < 1e-9,
+            "{alignment:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_already_moving_is_not_a_standing_start() {
+        assert!(launch_time_alignment(&run(1.5, 5.0), &run(0.0, 5.0)).is_none());
+    }
 }

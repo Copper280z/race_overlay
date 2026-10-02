@@ -64,7 +64,8 @@ fn headless_overlay_ui_builds_all_primary_panels() {
         ..Default::default()
     };
     let mut output = ctx.run_ui(raw, |ui| {
-        editor.top_bar(ui);
+        editor.header_left(ui);
+        editor.header_right(ui);
         editor.sources_panel(ui);
         editor.widgets_panel(ui);
         editor.data_plot_ui(ui);
@@ -666,4 +667,81 @@ fn session_edits_preserve_unknown_project_source_and_widget_fields() {
         encoded["project"]["widgets"][0]["future_widget_key"],
         Value::Number(serde_json::Number::from(42))
     );
+}
+
+#[test]
+#[ignore = "release benchmark; measures the default three-widget preview at two resolutions"]
+fn benchmark_preview_overlay_render() {
+    use overlay_render::{AlignedDatasets, RenderOptions, render_project_widgets_with_appearance};
+    use std::{hint::black_box, time::Instant};
+    if cfg!(debug_assertions) {
+        panic!("run this benchmark with --release");
+    }
+    let source_id = SourceId::new();
+    let dataset = AdapterRegistry::with_builtins()
+        .load(
+            "synthetic",
+            source_id,
+            &PathBuf::new(),
+            &json!({"duration_seconds": 20.0, "sample_rate_hz": 50.0}),
+        )
+        .unwrap();
+    let mut widgets = default_widgets_for(UnitSystem::Metric);
+    for (widget, bindings) in widgets.iter_mut().zip([
+        vec![("x", "lateral_g"), ("y", "longitudinal_g")],
+        vec![("value", "speed")],
+        vec![("value", "rpm")],
+    ]) {
+        for (slot, name) in bindings {
+            widget.bindings.push(ChannelBinding::new(
+                slot,
+                ChannelRef {
+                    source_id,
+                    channel_id: dataset.named(name).unwrap().descriptor.id,
+                },
+            ));
+        }
+    }
+    let datasets = vec![dataset];
+    let aligned = AlignedDatasets {
+        datasets: &datasets,
+        ..Default::default()
+    };
+    let appearance = appearance_for_preset("race_dark");
+    let options = RenderOptions {
+        crop: false,
+        full_size: false,
+    };
+    for size in [RenderSize::new(960, 540), RenderSize::new(1920, 1080)] {
+        let mut samples = Vec::new();
+        for i in 0..128 {
+            let at = Instant::now();
+            let result = render_project_widgets_with_appearance(
+                &widgets,
+                &aligned,
+                &appearance,
+                size,
+                f64::from(i) / 30.0,
+                options,
+            );
+            black_box(egui::ColorImage::from_rgba_unmultiplied(
+                [result.image.width as usize, result.image.height as usize],
+                &result.image.pixels,
+            ));
+            black_box(result);
+            if i >= 8 {
+                samples.push(at.elapsed().as_secs_f64());
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        eprintln!(
+            "Three-widget CPU render + UI color conversion {}×{}: median {:.2} ms, p95 {:.2} ms, mean {:.2} ms",
+            size.width,
+            size.height,
+            samples[samples.len() / 2] * 1000.0,
+            samples[samples.len() * 95 / 100] * 1000.0,
+            mean * 1000.0
+        );
+    }
 }

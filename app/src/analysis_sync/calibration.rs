@@ -1,5 +1,15 @@
 //! Camera IMU calibration into the vehicle coordinate frame.
 use super::super::*;
+use crate::ui_kit::{Tone, widgets};
+
+const RAW_IMU_CHANNELS: [&str; 6] = [
+    "raw_accel_x",
+    "raw_accel_y",
+    "raw_accel_z",
+    "raw_gyro_x",
+    "raw_gyro_y",
+    "raw_gyro_z",
+];
 
 fn vehicle_forward_axis_label(axis: usize) -> &'static str {
     match axis {
@@ -34,16 +44,9 @@ impl AnalysisApp {
         camera_video_offset: Option<f64>,
     ) {
         let has_raw_imu = self.data.get(&camera_source).is_some_and(|data| {
-            [
-                "raw_accel_x",
-                "raw_accel_y",
-                "raw_accel_z",
-                "raw_gyro_x",
-                "raw_gyro_y",
-                "raw_gyro_z",
-            ]
-            .iter()
-            .all(|name| data.raw.named(name).is_some())
+            RAW_IMU_CHANNELS
+                .iter()
+                .all(|name| data.raw.named(name).is_some())
         });
         let calibration_notes = self
             .workspace
@@ -54,11 +57,9 @@ impl AnalysisApp {
             .and_then(|snapshot| snapshot.camera_calibration.notes.as_deref())
             .map(str::to_owned);
         let mut apply = false;
-        ui.collapsing("Camera orientation / vehicle axes", |ui| {
+        ui.collapsing("Camera orientation", |ui| {
             if let Some(notes) = &calibration_notes {
-                ui.colored_label(
-                    egui::Color32::LIGHT_GREEN,
-                    "Vehicle-frame acceleration and rotation channels are available.",
+                widgets::callout(ui, Tone::Good, "Vehicle-frame acceleration and rotation channels are available.",
                 );
                 ui.small(notes);
             } else {
@@ -152,19 +153,90 @@ impl AnalysisApp {
         }
     }
 
+    /// Calibrates each newly loaded camera with the default orientation: the
+    /// camera faces the direction of travel and is levelled from the quietest
+    /// stationary stretch. Most mounts are like this, and the vehicle-frame
+    /// channels are what logger correlation needs. A wrong guess is corrected
+    /// by editing the orientation and applying again; this runs once per
+    /// source and never overrides a saved or manual calibration.
+    pub(in crate::analysis_app) fn apply_default_camera_calibrations(&mut self) {
+        let pending = self
+            .workspace
+            .recordings
+            .iter()
+            .flat_map(|recording| {
+                let calibrated = recording
+                    .overlay_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.camera_calibration.notes.is_some());
+                recording
+                    .sources
+                    .iter()
+                    .filter(move |source| {
+                        !calibrated
+                            && builtin_adapter_capabilities(&source.adapter)
+                                .vehicle_frame_calibration
+                    })
+                    .map(move |source| (recording, source))
+            })
+            .filter(|(recording, source)| {
+                let sync = self.video_sync.recording(recording.id);
+                let has_imu = self.data.get(&source.id).is_some_and(|data| {
+                    RAW_IMU_CHANNELS
+                        .iter()
+                        .all(|name| data.raw.named(name).is_some())
+                });
+                // With a video, the stationary range is in video time, which
+                // needs the audio match first (or its failure, which leaves
+                // raw camera time).
+                let time_settled = recording.video_path.is_none()
+                    || CameraVideoSyncMetadata::read(&source.settings)
+                        .camera_minus_video_seconds
+                        .is_some()
+                    || sync.is_some_and(|state| state.audio_results.contains_key(&source.id));
+                has_imu
+                    && time_settled
+                    && sync.is_none_or(|state| {
+                        !state.auto_calibration_tried.contains(&source.id)
+                            && !state.audio_jobs.contains_key(&source.id)
+                    })
+            })
+            .map(|(recording, source)| {
+                (
+                    recording.id,
+                    source.id,
+                    CameraVideoSyncMetadata::read(&source.settings).camera_minus_video_seconds,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (recording_id, source_id, camera_video_offset) in pending {
+            let state = self.video_sync.recording_mut(recording_id);
+            state.auto_calibration_tried.insert(source_id);
+            state
+                .calibration_drafts
+                .entry(source_id)
+                .or_default()
+                .source_time = camera_video_offset.is_none();
+            if self.apply_camera_calibration(recording_id, source_id, camera_video_offset) {
+                self.message = "Assumed the camera faces the direction of travel and levelled it from a stationary moment. If that is wrong, change it under Camera orientation in Video alignment and apply again.".into();
+            }
+        }
+    }
+
+    /// Fits and applies the draft calibration; false when it could not be.
     pub(super) fn apply_camera_calibration(
         &mut self,
         recording_id: RecordingId,
         camera_source_id: SourceId,
         camera_video_offset: Option<f64>,
-    ) {
+    ) -> bool {
         let Some(draft) = self
             .video_sync
             .recording(recording_id)
             .and_then(|state| state.calibration_drafts.get(&camera_source_id))
             .cloned()
         else {
-            return;
+            return false;
         };
         let Some(source) = self
             .workspace
@@ -179,7 +251,7 @@ impl AnalysisApp {
             })
             .cloned()
         else {
-            return;
+            return false;
         };
         let Some(raw) = self
             .data
@@ -187,7 +259,7 @@ impl AnalysisApp {
             .map(|data| data.raw.clone())
         else {
             self.message = "Camera telemetry is still loading.".into();
-            return;
+            return false;
         };
         let source_time_offset = if draft.source_time {
             0.0
@@ -195,7 +267,7 @@ impl AnalysisApp {
             offset
         } else {
             self.message = "Wait for camera/video audio alignment, or use raw source time.".into();
-            return;
+            return false;
         };
         let mut processed = raw.as_ref().clone();
         let source_cutoff = source
@@ -212,7 +284,7 @@ impl AnalysisApp {
             });
         if let Err(error) = prepare_loaded_dataset(&mut processed, source_cutoff, None) {
             self.message = error;
-            return;
+            return false;
         }
         let outcome = match fit_vehicle_frame_calibration(
             &processed,
@@ -230,7 +302,7 @@ impl AnalysisApp {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.message = format!("Camera calibration failed: {error}");
-                return;
+                return false;
             }
         };
         let mut calibration = outcome.calibration;
@@ -245,7 +317,7 @@ impl AnalysisApp {
         ));
         if !add_derived_inertial_channels(&mut processed, &calibration, 1_000.0) {
             self.message = "Camera calibration could not create vehicle-frame channels.".into();
-            return;
+            return false;
         }
         let Some(fallback_snapshot) = self
             .workspace
@@ -254,7 +326,7 @@ impl AnalysisApp {
             .find(|recording| recording.id == recording_id)
             .map(project_from_recording)
         else {
-            return;
+            return false;
         };
         if let Some(recording) = self
             .workspace
@@ -285,5 +357,6 @@ impl AnalysisApp {
             "Calibration applied; lateral acceleration is now available for alignment.".into()
         };
         self.changed();
+        true
     }
 }

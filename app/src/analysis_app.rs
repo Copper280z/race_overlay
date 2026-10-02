@@ -1,5 +1,5 @@
 //! Telemetry-first analysis workspace. The existing overlay editor is a separate mode.
-use crate::analysis_maps::{MapColorMode, MapPanel, MapSettings, MapTrace};
+use crate::analysis_maps::{MapPanel, MapSettings, MapTrace};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use overlay_core::*;
@@ -15,12 +15,21 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+#[path = "analysis_chrome.rs"]
+mod chrome;
+#[path = "analysis_decimate.rs"]
+mod decimate;
+pub use chrome::{LAYOUT_PRESETS, PanelChoice};
 #[path = "analysis_io.rs"]
 mod io;
 #[path = "analysis_model.rs"]
 mod model;
 #[path = "analysis_recordings.rs"]
 mod recordings;
+#[path = "analysis_setup/mod.rs"]
+mod setup;
+#[path = "analysis_statistics.rs"]
+mod statistics;
 #[path = "analysis_sync/mod.rs"]
 mod sync;
 #[cfg(test)]
@@ -58,6 +67,7 @@ pub struct AnalysisApp {
     plot_cache: HashMap<String, Arc<Vec<PlotTrace>>>,
     scatter_cache: HashMap<String, Arc<Vec<ScatterTrace>>>,
     map_cache: HashMap<String, Vec<MapTrace>>,
+    trace_palette: [egui::Color32; 8],
     maps: HashMap<u64, MapPanel>,
     videos: HashMap<u64, VideoRuntime>,
     visible_videos: HashSet<u64>,
@@ -69,9 +79,14 @@ pub struct AnalysisApp {
     active_overlay: Option<RecordingId>,
     remove_recording: Option<RecordingId>,
     auto_select_pending: bool,
+    /// Newly added recordings may belong to one another (a log and the video
+    /// recorded during it); checked once everything has loaded.
+    pair_pending: bool,
     select_imports_pending: HashSet<RecordingId>,
     auto_mode_pending: bool,
     automatic_mode: bool,
+    initial_layout_pending: bool,
+    setup_tab: setup::SetupTab,
 }
 impl AnalysisApp {
     pub fn new() -> Self {
@@ -102,6 +117,7 @@ impl AnalysisApp {
             plot_cache: HashMap::new(),
             scatter_cache: HashMap::new(),
             map_cache: HashMap::new(),
+            trace_palette: crate::ui_kit::theme::palette().traces,
             maps: HashMap::new(),
             videos: HashMap::new(),
             visible_videos: HashSet::new(),
@@ -113,11 +129,14 @@ impl AnalysisApp {
             active_overlay: None,
             remove_recording: None,
             auto_select_pending: false,
+            pair_pending: false,
             select_imports_pending: HashSet::new(),
             auto_mode_pending: false,
             automatic_mode: true,
+            initial_layout_pending: true,
+            setup_tab: Default::default(),
         };
-        app.layout(0);
+        app.layout(1);
         app.dirty = false;
         app
     }
@@ -130,16 +149,26 @@ impl AnalysisApp {
             unknown: Default::default(),
         }
     }
+    /// Builds one of the layout presets: 0 Quick Compare, 1 Data Focus,
+    /// 2 Video Compare. `egui_dock` split fractions are the share taken by the
+    /// top/left child, whichever of the two is new.
     fn layout(&mut self, preset: usize) {
+        let video = |app: &mut Self, slot| {
+            app.tab(TabKind::Video(VideoOptions {
+                slot,
+                segment: None,
+                linked: true,
+                time: 0.0,
+                unknown: Default::default(),
+            }))
+        };
         let plot = self.tab(TabKind::Plot(Default::default()));
+        let delta = self.tab(TabKind::Plot(PlotOptions {
+            delta: true,
+            ..Default::default()
+        }));
         let browser = self.tab(TabKind::Browser);
         let setup = self.tab(TabKind::Setup);
-        self.dock = DockState::new(vec![plot]);
-        let [main, _] =
-            self.dock
-                .main_surface_mut()
-                .split_left(NodeIndex::root(), 0.78, vec![browser, setup]);
-        let stats = self.tab(TabKind::Stats);
         let map = self.tab(TabKind::Map {
             channel: "gps_speed".into(),
             settings: Default::default(),
@@ -148,36 +177,22 @@ impl AnalysisApp {
             channel: "gps_speed".into(),
             settings: Box::new(MapSettings {
                 actual_gps: true,
+                small_multiples: false,
                 ..Default::default()
             }),
         });
-        let [upper, _] =
-            self.dock
-                .main_surface_mut()
-                .split_below(main, 0.64, vec![map, imagery, stats]);
-        if preset != 1 {
-            let left = self.tab(TabKind::Video(VideoOptions {
-                slot: 0,
-                segment: None,
-                linked: true,
-                time: 0.0,
-                unknown: Default::default(),
-            }));
-            let right = self.tab(TabKind::Video(VideoOptions {
-                slot: 1,
-                segment: None,
-                linked: true,
-                time: 0.0,
-                unknown: Default::default(),
-            }));
-            let [_, video] = self.dock.main_surface_mut().split_above(
-                upper,
-                if preset == 2 { 0.55 } else { 0.38 },
-                vec![left],
-            );
-            self.dock
-                .main_surface_mut()
-                .split_right(video, 0.5, vec![right]);
+        let stats = self.tab(TabKind::Stats);
+        let videos = (preset != 1).then(|| [video(self, 0), video(self, 1)]);
+        self.dock = DockState::new(vec![plot, delta]);
+        let surface = self.dock.main_surface_mut();
+        // Recordings on the left, analysis in the middle, maps and values right.
+        let [main, _] = surface.split_left(NodeIndex::root(), 0.24, vec![browser, setup]);
+        let side_share = if preset == 2 { 0.76 } else { 0.70 };
+        let [main, _] = surface.split_right(main, side_share, vec![map, imagery, stats]);
+        if let Some([first, second]) = videos {
+            let video_share = if preset == 2 { 0.55 } else { 0.40 };
+            let [_, top] = surface.split_above(main, video_share, vec![first]);
+            surface.split_right(top, 0.5, vec![second]);
         }
         self.videos.clear();
         self.dirty = true;
@@ -188,6 +203,26 @@ impl AnalysisApp {
         self.plot_cache.clear();
         self.scatter_cache.clear();
         self.map_cache.clear();
+    }
+    fn refresh_trace_palette(&mut self, palette: [egui::Color32; 8]) {
+        if self.trace_palette != palette {
+            self.trace_palette = palette;
+            self.plot_cache.clear();
+            self.scatter_cache.clear();
+            self.map_cache.clear();
+        }
+    }
+    /// Choose the first import's layout once; later imports preserve the dock.
+    fn finish_initial_layout(&mut self) {
+        if self.initial_layout_pending && !self.workspace.recordings.is_empty() {
+            let has_video = self
+                .workspace
+                .recordings
+                .iter()
+                .any(|r| r.video_path.is_some());
+            self.layout(if has_video { 0 } else { 1 });
+            self.initial_layout_pending = false;
+        }
     }
     pub fn pause(&mut self) {
         self.playing = false;
@@ -256,6 +291,68 @@ impl AnalysisApp {
     }
     pub fn clear_overlay_link(&mut self) {
         self.active_overlay = None;
+    }
+    /// Workspace name for the window header and whether it has unsaved edits.
+    pub fn document_title(&self) -> (String, bool) {
+        let name = self
+            .path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .map(|name| {
+                name.strip_suffix(".race-analysis.json")
+                    .map(str::to_owned)
+                    .unwrap_or(name)
+            })
+            .unwrap_or_else(|| "Untitled workspace".into());
+        (name, self.dirty)
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    /// Background work worth showing in the status bar, if any.
+    pub fn busy_label(&self) -> Option<String> {
+        (self.preparing || !self.loading.is_empty()).then(|| {
+            if self.loading.is_empty() {
+                "Preparing comparison…".into()
+            } else {
+                format!("Loading {} source(s)…", self.loading.len())
+            }
+        })
+    }
+    pub fn issues(&self) -> &[String] {
+        &self.errors
+    }
+    pub fn clear_issues(&mut self) {
+        self.errors.clear();
+    }
+    pub fn notify(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+    }
+    /// Imports telemetry, video, or workspace files as if they were dropped.
+    #[cfg(test)]
+    pub fn add_files(&mut self, paths: Vec<PathBuf>) {
+        self.add_paths(paths);
+    }
+    /// Attaches `path` as the video of the first recording.
+    #[cfg(test)]
+    pub fn attach_video_to_first(&mut self, path: PathBuf) {
+        if let Some(id) = self.workspace.recordings.first().map(|r| r.id) {
+            self.attach_video(id, path);
+        }
+    }
+    /// True when no import or comparison work is pending.
+    #[cfg(test)]
+    pub fn is_settled(&self) -> bool {
+        !self.preparing && self.loading.is_empty() && self.prepared_revision == self.revision
+    }
+    pub fn toggle_play(&mut self) {
+        if self.reference_run().is_some() {
+            self.playing = !self.playing;
+        }
+    }
+    pub fn save_workspace(&mut self) {
+        self.save(false);
     }
     fn default_selection(&mut self) {
         self.state
@@ -349,11 +446,14 @@ impl AnalysisApp {
         }
     }
     pub fn ui(&mut self, ui: &mut egui::Ui, tools: Option<&FfmpegTools>, units: UnitSystem) {
+        self.refresh_trace_palette(crate::ui_kit::theme::palette().traces);
         if !self.workspace.settings.is_object() {
             self.workspace.settings = json!({});
         }
         self.poll(ui.ctx());
         self.start_pending_video_audio_sync(tools);
+        self.apply_default_camera_calibrations();
+        self.drive_auto_sync();
         let dt = self.last_frame.elapsed().as_secs_f64().min(0.1);
         self.last_frame = Instant::now();
         if self.playing {
@@ -372,28 +472,53 @@ impl AnalysisApp {
         if !drops.is_empty() {
             self.add_paths(drops);
         }
-        self.toolbar(ui);
-        if self.preparing || !self.loading.is_empty() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.small(format!(
-                    "Preparing comparison · {} source(s) loading",
-                    self.loading.len()
-                ));
-            });
+        if !self.workspace.recordings.is_empty() {
+            self.transport(ui);
         }
-        if !self.errors.is_empty() {
-            ui.collapsing(format!("{} issue(s)", self.errors.len()), |ui| {
-                for e in &self.errors {
-                    ui.colored_label(egui::Color32::LIGHT_RED, e);
-                }
-                if ui.button("Dismiss").clicked() {
-                    self.errors.clear();
-                }
-            });
-        }
-        ui.small(&self.message);
         self.visible_videos.clear();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(crate::ui_kit::theme::surface::canvas()))
+            .show(ui, |ui| {
+                if self.workspace.recordings.is_empty() {
+                    self.welcome(ui);
+                } else {
+                    self.dock_area(ui, tools, units);
+                }
+            });
+        if ui.input(|i| !i.raw.hovered_files.is_empty()) {
+            drop_overlay(ui.ctx());
+        }
+        let open_ids: HashSet<_> = self.dock.iter_all_tabs().map(|(_, t)| t.id).collect();
+        self.maps.retain(|id, _| open_ids.contains(id));
+        let cache_is_open = |key: &String| {
+            key.split(':')
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_some_and(|id| open_ids.contains(&id))
+        };
+        self.plot_cache.retain(|key, _| cache_is_open(key));
+        self.scatter_cache.retain(|key, _| cache_is_open(key));
+        self.map_cache.retain(|key, _| cache_is_open(key));
+        self.videos.retain(|id, _| self.visible_videos.contains(id));
+        if self.playing {
+            ui.ctx().request_repaint();
+        } else if self.has_background_work() {
+            // Worker threads hand results over a channel without waking the
+            // UI, so poll while any are running.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        self.remove_dialog(ui.ctx());
+    }
+    /// True while a worker may deliver something the next frame must show.
+    fn has_background_work(&self) -> bool {
+        self.preparing
+            || self.prepared_revision != self.revision
+            || !self.loading.is_empty()
+            || !self.probing.is_empty()
+            || self.video_sync.has_jobs()
+    }
+    fn dock_area(&mut self, ui: &mut egui::Ui, tools: Option<&FfmpegTools>, units: UnitSystem) {
         let mut dock = std::mem::replace(&mut self.dock, DockState::new(vec![]));
         struct Viewer<'a> {
             app: &'a mut AnalysisApp,
@@ -412,7 +537,7 @@ impl AnalysisApp {
                 match &mut t.kind {
                     TabKind::Browser => self.app.browser(ui, self.tools),
                     TabKind::Setup => self.app.setup(ui),
-                    TabKind::Stats => self.app.statistics(ui, self.units),
+                    TabKind::Stats => self.app.statistics(ui, t.id, self.units),
                     TabKind::Plot(p) => self.app.plot(ui, t.id, p, self.units),
                     TabKind::Scatter(options) => self.app.scatter(ui, t.id, options, self.units),
                     TabKind::Video(v) => self.app.video(ui, t.id, v, self.tools),
@@ -422,31 +547,17 @@ impl AnalysisApp {
                 }
             }
         }
-        DockArea::new(&mut dock).show_inside(
-            ui,
-            &mut Viewer {
-                app: self,
-                tools,
-                units,
-            },
-        );
+        DockArea::new(&mut dock)
+            .style(crate::ui_kit::theme::dock_style(ui.style()))
+            .show_inside(
+                ui,
+                &mut Viewer {
+                    app: self,
+                    tools,
+                    units,
+                },
+            );
         self.dock = dock;
-        let open_ids: HashSet<_> = self.dock.iter_all_tabs().map(|(_, t)| t.id).collect();
-        self.maps.retain(|id, _| open_ids.contains(id));
-        let cache_is_open = |key: &String| {
-            key.split(':')
-                .next()
-                .and_then(|v| v.parse::<u64>().ok())
-                .is_some_and(|id| open_ids.contains(&id))
-        };
-        self.plot_cache.retain(|key, _| cache_is_open(key));
-        self.scatter_cache.retain(|key, _| cache_is_open(key));
-        self.map_cache.retain(|key, _| cache_is_open(key));
-        self.videos.retain(|id, _| self.visible_videos.contains(id));
-        if self.playing {
-            ui.ctx().request_repaint();
-        }
-        self.remove_dialog(ui.ctx());
     }
     fn reference_run(&self) -> Option<&PreparedRun> {
         self.workspace
@@ -496,24 +607,13 @@ impl AnalysisApp {
         let x = self.x_at_time(reference, reference.start + self.state.cursor)?;
         self.time_at_x(run, x)
     }
-    fn delta_window(&self, run: &PreparedRun) -> (f64, f64) {
-        if self.workspace.course.gates.is_empty() {
-            return (run.start, run.end);
-        }
-        let Some(recording) = self
-            .workspace
-            .recordings
-            .iter()
-            .find(|recording| recording.id == run.key.recording_id)
-        else {
-            return (run.start, run.end);
-        };
-        let Some(data) = self.data.get(&recording.primary_source) else {
-            return (run.start, run.end);
-        };
-        let gps = gps_points(&data.raw, recording);
-        gate_window(&gps, &self.workspace.course.gates, run.start, run.end)
-            .unwrap_or((run.start, run.end))
+    /// Elapsed time is measured from here: the start gate when both this run
+    /// and the reference cross it, otherwise the interval start.
+    fn elapsed_origin(&self, run: &PreparedRun) -> f64 {
+        self.reference_run()
+            .and_then(|reference| reference.start_gate)
+            .and(run.start_gate)
+            .unwrap_or(run.start)
     }
     fn scrub_x(&mut self, x: f64) {
         if let Some(r) = self.reference_run()
@@ -577,6 +677,19 @@ impl AnalysisApp {
             .and_then(find)
             .or_else(|| recording.sources.iter().find_map(find))
     }
+    /// Channels a plot can offer: everything loaded, plus any it already
+    /// lists that no loaded source has (such as the default speed and RPM
+    /// when only a camera is loaded), so those can still be switched off.
+    fn channel_choices(&self, selected: &[String]) -> Vec<String> {
+        let available = self.channel_names();
+        let mut choices = selected
+            .iter()
+            .filter(|name| !available.contains(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        choices.extend(available);
+        choices
+    }
     fn channel_names(&self) -> Vec<String> {
         let mut names = self
             .data
@@ -608,7 +721,8 @@ fn run_color(
         .position(|selected| selected == key)
         .or_else(|| (reference == Some(key)).then_some(selection.len()))
         .unwrap_or_default();
-    COLORS[index % COLORS.len()]
+    let colors = crate::ui_kit::theme::palette().traces;
+    colors[index % colors.len()]
 }
 fn adapter_for(path: &Path) -> &'static str {
     match path
@@ -641,4 +755,46 @@ fn display_unit(unit: Unit, quantity: Quantity, system: UnitSystem) -> Unit {
         .default_unit_for(&quantity)
         .filter(|u| u.family() == unit.family())
         .unwrap_or(unit)
+}
+
+#[cfg(test)]
+impl AnalysisApp {
+    pub fn set_setup_tab_for_test(&mut self, index: usize) {
+        self.setup_tab = [
+            setup::SetupTab::Intervals,
+            setup::SetupTab::Sources,
+            setup::SetupTab::Gates,
+        ][index];
+    }
+    /// Brings the first tab whose title contains `title` to the front.
+    pub fn focus_tab_for_test(&mut self, title: &str) -> bool {
+        let Some(location) = self.dock.find_tab_from(|tab| tab.title().contains(title)) else {
+            return false;
+        };
+        self.dock.set_active_tab(location).is_ok()
+    }
+}
+
+/// Full-window hint while files are dragged over the application.
+fn drop_overlay(ctx: &egui::Context) {
+    use crate::ui_kit::theme;
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("file-drop-overlay"),
+    ));
+    let rect = ctx.content_rect();
+    painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(150));
+    painter.rect_stroke(
+        rect.shrink(16.0),
+        12.0,
+        egui::Stroke::new(2.0, theme::accent()),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Drop to import",
+        egui::FontId::proportional(24.0),
+        theme::text::strong(),
+    );
 }

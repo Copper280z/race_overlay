@@ -40,6 +40,10 @@ pub struct PreparedComparisonRun {
     pub distance: Vec<ProgressSample>,
     pub progress: Vec<ProgressSample>,
     pub time_alignment: Option<ComparisonTimeAlignment>,
+    /// Recording times at which the run crosses the start and finish gates
+    /// inside its interval, when it does.
+    pub start_gate: Option<f64>,
+    pub finish_gate: Option<f64>,
 }
 
 #[derive(Default)]
@@ -53,8 +57,12 @@ mod alignment;
 mod sampling;
 
 use alignment::best_effort_time_alignment;
+use sampling::run_gate_times;
 use sampling::timed_samples_inside_interval;
-pub use sampling::{gate_window, gps_inside_interval, segment};
+pub use sampling::{gate_laps, gps_inside_interval, segment};
+
+/// [`ComparisonTimeAlignment::channel`] of runs aligned at the start gate.
+pub const START_GATE_ALIGNMENT: &str = "start gate";
 
 pub fn prepare_comparison(
     workspace: &AnalysisWorkspace,
@@ -83,19 +91,25 @@ pub fn prepare_comparison(
     {
         keys.push(reference.clone());
     }
-    let automatic_time_alignment = workspace.course.gates.is_empty()
-        && keys
-            .iter()
-            .map(|key| key.recording_id)
-            .collect::<HashSet<_>>()
-            .len()
-            > 1;
+    let multiple_recordings = keys
+        .iter()
+        .map(|key| key.recording_id)
+        .collect::<HashSet<_>>()
+        .len()
+        > 1;
     let mut runs = keys
         .iter()
         .filter_map(|key| {
             let (r, s) = segment(workspace, key)?;
             let dataset = &data.get(&r.primary_source)?.raw;
-            let gps = gps_for(key);
+            let track = gps_points(dataset, r);
+            let (start_gate, finish_gate) = run_gate_times(
+                &track,
+                &workspace.course.gates,
+                s.start_recording_time,
+                s.end_recording_time,
+            );
+            let gps = gps_inside_interval(&track, s.start_recording_time, s.end_recording_time);
             let traveled = traveled_distance(dataset, r, &gps);
             let in_range = timed_samples_inside_interval(
                 &traveled.samples,
@@ -154,25 +168,45 @@ pub fn prepare_comparison(
                 distance,
                 progress,
                 time_alignment: None,
+                start_gate,
+                finish_gate,
             })
         })
         .collect::<Vec<_>>();
-    if automatic_time_alignment
-        && let Some(reference) = &workspace.reference
+    if let Some(reference) = &workspace.reference
         && let Some(reference_run) = runs.iter().find(|run| run.key == *reference).cloned()
     {
         for run in &mut runs {
             if run.key != *reference {
-                run.time_alignment =
-                    best_effort_time_alignment(workspace, &reference_run, run, data);
+                run.time_alignment = start_gate_alignment(&reference_run, run).or_else(|| {
+                    multiple_recordings
+                        .then(|| best_effort_time_alignment(workspace, &reference_run, run, data))
+                        .flatten()
+                });
             }
         }
     }
+    let automatic_time_alignment =
+        multiple_recordings || runs.iter().any(|run| run.time_alignment.is_some());
     PreparedComparison {
         runs,
         course,
         automatic_time_alignment,
     }
+}
+
+/// Places the run's start-gate crossing at the reference's. A shared physical
+/// line is exact, so it takes precedence over best-effort correlation.
+fn start_gate_alignment(
+    reference: &PreparedComparisonRun,
+    run: &PreparedComparisonRun,
+) -> Option<ComparisonTimeAlignment> {
+    Some(ComparisonTimeAlignment {
+        offset_seconds: (reference.start_gate? - reference.start) - (run.start_gate? - run.start),
+        coefficient: None,
+        channel: START_GATE_ALIGNMENT,
+        distance_offset_meters: None,
+    })
 }
 
 fn course_matching_anchors(

@@ -82,6 +82,7 @@ impl AnalysisApp {
         for source in recording.sources {
             self.enqueue(source);
         }
+        self.finish_initial_layout();
         self.changed();
     }
     pub(super) fn enqueue(&mut self, source: SourceConfig) {
@@ -184,6 +185,7 @@ impl AnalysisApp {
         let id = recording.id;
         self.workspace.recordings.push(recording);
         self.auto_select_pending = true;
+        self.pair_pending = true;
         self.state.selected_recording = Some(id);
         self.enqueue(source);
         self.changed();
@@ -231,6 +233,7 @@ impl AnalysisApp {
             self.workspace.settings["unassigned_videos"] = json!(videos);
             self.message = "Videos need pairing: choose one in the recording browser.".into();
         }
+        self.finish_initial_layout();
     }
     pub(super) fn attach_video(&mut self, id: RecordingId, path: PathBuf) {
         let mut camera_sources = Vec::new();
@@ -300,6 +303,7 @@ impl AnalysisApp {
                     }
                     match result {
                         Ok(data) => {
+                            self.promote_logger_to_primary(id, &data);
                             if let Some(recording) = self
                                 .workspace
                                 .recordings
@@ -356,6 +360,10 @@ impl AnalysisApp {
                     self.handle_video_alignment_estimated(serial, recording_id, result);
                 }
             }
+        }
+        if self.loading.is_empty() && self.pair_pending {
+            self.pair_pending = false;
+            self.pair_loggers_with_cameras();
         }
         if self.loading.is_empty() && self.auto_select_pending {
             self.auto_select_pending = false;

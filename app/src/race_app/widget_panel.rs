@@ -6,12 +6,81 @@ use super::super::policy::{
     style_number, style_string, track_map_mode_label, unit_name, widget_appearance_ui,
 };
 use super::{OverlayEditor, PanelAction};
-use eframe::egui;
+use crate::ui_kit::{theme::text, widgets};
+use eframe::egui::{self, RichText};
 use overlay_core::ChannelBinding;
 use serde_json::json;
 use std::collections::HashMap;
 
+fn widget_kind_label(kind: &str) -> &str {
+    match kind {
+        "numeric" => "Number",
+        "bar" => "Bar",
+        "radial" => "Gauge",
+        "xy_dot" => "G meter",
+        "tachometer" => "Tachometer",
+        "temperature" => "Temperature",
+        "lap_timer" => "Lap timer",
+        "delta" => "Delta",
+        "shift_lights" => "Shift lights",
+        "center_bar" => "Center bar",
+        "gear" => "Gear",
+        "track_map" => "Track map",
+        other => other,
+    }
+}
+
+fn slot_caption(slot: &str) -> &str {
+    match slot {
+        "value" => "Channel",
+        "x" => "X channel",
+        "y" => "Y channel",
+        "latitude" => "Latitude",
+        "longitude" => "Longitude",
+        other => other,
+    }
+}
+
 impl OverlayEditor {
+    fn add_widget_menu(&mut self, ui: &mut egui::Ui) {
+        let groups: [(&str, &[(&str, &str)]); 3] = [
+            (
+                "Instruments",
+                &[
+                    ("Number", "numeric"),
+                    ("Bar", "bar"),
+                    ("Gauge", "radial"),
+                    ("Tachometer", "tachometer"),
+                    ("Temperature", "temperature"),
+                    ("G meter", "xy_dot"),
+                    ("Gear", "gear"),
+                    ("Shift lights", "shift_lights"),
+                    ("Center bar", "center_bar"),
+                ],
+            ),
+            ("Timing", &[("Lap timer", "lap_timer"), ("Delta", "delta")]),
+            ("Map", &[("Track map", "track_map")]),
+        ];
+        for (title, kinds) in groups {
+            widgets::section_label(ui, title);
+            for (label, kind) in kinds {
+                if widgets::menu_item(ui, label, None) {
+                    self.add_widget(kind);
+                    ui.close();
+                }
+            }
+        }
+        ui.separator();
+        if widgets::menu_item(
+            ui,
+            "MyChron dashboard",
+            Some("A full set of dashboard widgets"),
+        ) {
+            self.add_mychron_dashboard();
+            ui.close();
+        }
+    }
+
     pub(super) fn appearance_panel(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
         let mut make_all_inherit = false;
@@ -116,33 +185,29 @@ impl OverlayEditor {
     }
 
     pub(in crate::race_app) fn widgets_panel(&mut self, ui: &mut egui::Ui) {
+        if !self.session.has_project() {
+            widgets::empty_state(
+                ui,
+                "Nothing to edit",
+                "Open a video to place gauges, bars, and maps over it.",
+                |_| {},
+            );
+            return;
+        }
         self.appearance_panel(ui);
-        ui.separator();
-        ui.heading("Widgets");
-        ui.horizontal_wrapped(|ui| {
-            for (label, kind) in [
-                ("Number", "numeric"),
-                ("Bar", "bar"),
-                ("Gauge", "radial"),
-                ("G meter", "xy_dot"),
-                ("Tachometer", "tachometer"),
-                ("Temperature", "temperature"),
-                ("Lap timer", "lap_timer"),
-                ("Delta", "delta"),
-                ("Shift lights", "shift_lights"),
-                ("Center bar", "center_bar"),
-                ("Gear", "gear"),
-                ("Track map", "track_map"),
-            ] {
-                if ui.button(format!("+ {label}")).clicked() {
-                    self.add_widget(kind);
-                }
-            }
-            if ui.button("+ MyChron dashboard").clicked() {
-                self.add_mychron_dashboard();
-            }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Widgets")
+                    .strong()
+                    .size(15.0)
+                    .color(text::strong()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::action_menu(ui, "Add ⏷", |ui| self.add_widget_menu(ui));
+            });
         });
-        let widgets = self
+        let widgets_snapshot = self
             .project()
             .map(|p| p.widgets.clone())
             .unwrap_or_default();
@@ -150,15 +215,29 @@ impl OverlayEditor {
             .project()
             .map(|p| p.appearance.clone())
             .unwrap_or_else(|| appearance_for_preset("race_dark"));
-        for widget in &widgets {
+        if widgets_snapshot.is_empty() {
+            widgets::hint(ui, "No widgets yet. Use Add to place one on the video.");
+        }
+        for widget in &widgets_snapshot {
             let label = style_string(&widget.style, "label").unwrap_or_else(|| widget.kind.clone());
-            if ui
-                .selectable_label(self.widget_editor.selected_widget == Some(widget.id), label)
-                .clicked()
-            {
+            let selected = self.widget_editor.selected_widget == Some(widget.id);
+            let row = widgets::list_row(ui, selected, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).color(text::strong()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(widget_kind_label(&widget.kind))
+                                .small()
+                                .color(text::weak()),
+                        );
+                    });
+                });
+            });
+            if row.response.clicked() {
                 self.apply_panel_action(PanelAction::SelectWidget(widget.id));
             }
         }
+        let widgets = widgets_snapshot;
         let Some(index) = self.selected_widget_index() else {
             return;
         };
@@ -166,7 +245,8 @@ impl OverlayEditor {
             return;
         }
         let widget_id = widgets[index].id;
-        ui.separator();
+        ui.add_space(8.0);
+        widgets::section_label(ui, "Data");
         let slot_names: &[&str] = if widgets[index].kind == "xy_dot" {
             &["x", "y"]
         } else if widgets[index].kind == "track_map" {
@@ -183,21 +263,26 @@ impl OverlayEditor {
             } else {
                 self.channel_choices()
             };
-            egui::ComboBox::from_label(format!("{slot} channel"))
-                .selected_text(current_label)
-                .show_ui(ui, |ui| {
-                    for (reference, label) in &choices {
-                        let selected = current.is_some_and(|b| b.channel == *reference);
-                        if ui.selectable_label(selected, label).clicked() {
-                            if widgets[index].kind == "track_map" {
-                                self.bind_track_map_coordinate(index, slot, reference.clone());
-                            } else {
-                                self.bind_widget_channel(index, slot, reference.clone());
+            ui.horizontal(|ui| {
+                ui.label(slot_caption(slot));
+                egui::ComboBox::from_id_salt(("widget-slot", widget_id, *slot))
+                    .selected_text(current_label)
+                    .width(ui.available_width() - 8.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        for (reference, label) in &choices {
+                            let selected = current.is_some_and(|b| b.channel == *reference);
+                            if ui.selectable_label(selected, label).clicked() {
+                                if widgets[index].kind == "track_map" {
+                                    self.bind_track_map_coordinate(index, slot, reference.clone());
+                                } else {
+                                    self.bind_widget_channel(index, slot, reference.clone());
+                                }
+                                refresh = true;
                             }
-                            refresh = true;
                         }
-                    }
-                });
+                    });
+            });
         }
         let descriptors: HashMap<_, _> = self
             .session
@@ -227,18 +312,21 @@ impl OverlayEditor {
             .flatten();
         let mut requested_unit = None;
         if let Some((current, units)) = &unit_context {
-            egui::ComboBox::from_id_salt(("widget-display-unit", widgets[index].id))
-                .selected_text(format!("Display unit: {}", unit_name(current)))
-                .show_ui(ui, |ui| {
-                    for unit in units {
-                        if ui
-                            .selectable_label(unit == current, unit_name(unit))
-                            .clicked()
-                        {
-                            requested_unit = Some(unit.clone());
+            ui.horizontal(|ui| {
+                ui.label("Unit");
+                egui::ComboBox::from_id_salt(("widget-display-unit", widgets[index].id))
+                    .selected_text(unit_name(current))
+                    .show_ui(ui, |ui| {
+                        for unit in units {
+                            if ui
+                                .selectable_label(unit == current, unit_name(unit))
+                                .clicked()
+                            {
+                                requested_unit = Some(unit.clone());
+                            }
                         }
-                    }
-                });
+                    });
+            });
         }
         let mut capture_start = false;
         let mut capture_finish = false;
@@ -257,7 +345,10 @@ impl OverlayEditor {
                     })
             };
             if widget.bindings.iter().any(filterable) {
-                ui.small("Zero-phase, non-causal smoothing only for this widget's bound continuous inputs. The displayed cutoff is the final two-pass -3 dB point; enabled upstream filters cascade.");
+                widgets::hint(
+                    ui,
+                    "Smoothing applies only to this widget's continuous inputs (zero-phase, non-causal). The cutoff shown is the final two-pass -3 dB point; upstream filters cascade.",
+                );
                 let mut enabled = widget
                     .bindings
                     .iter()
@@ -298,7 +389,10 @@ impl OverlayEditor {
                     refresh = true;
                 }
             } else if widget.kind != "track_map" && !widget.bindings.is_empty() {
-                ui.small("This widget uses discrete data; low-pass is not applicable.");
+                widgets::hint(
+                    ui,
+                    "This widget uses discrete data; low-pass does not apply.",
+                );
             }
             if widget.kind != "track_map" {
                 for binding in &mut widget.bindings {
@@ -316,8 +410,7 @@ impl OverlayEditor {
                 }
             }
             if widget.kind == "track_map" {
-                ui.separator();
-                ui.label("GPS track map");
+                widgets::section_label(ui, "Track map");
                 let mut mode = style_string(&widget.style, "track_mode")
                     .or_else(|| style_string(&widget.style, "mode"))
                     .unwrap_or_else(|| "auto".into());
@@ -405,8 +498,12 @@ impl OverlayEditor {
                     set_style(&mut widget.style, "show_markers", json!(show_markers));
                     refresh = true;
                 }
-                ui.small("Circuit mode keeps one representative lap; point-to-point uses the start and finish markers.");
+                widgets::hint(
+                    ui,
+                    "Circuit mode keeps one representative lap; point-to-point uses the start and finish markers.",
+                );
             }
+            widgets::section_label(ui, "Look");
             let mut inherit_appearance =
                 style_bool(&widget.style, "inherit_appearance").unwrap_or(true);
             if ui
@@ -428,18 +525,37 @@ impl OverlayEditor {
                 });
             }
             let mut label = style_string(&widget.style, "label").unwrap_or_default();
-            if ui.text_edit_singleline(&mut label).changed() {
-                set_style(&mut widget.style, "label", json!(label));
-                refresh = true;
-            }
-            if unit_context.is_none() && widget.kind != "track_map" {
-                let mut unit = style_string(&widget.style, "unit").unwrap_or_default();
-                if ui.text_edit_singleline(&mut unit).changed() {
-                    set_style(&mut widget.style, "unit", json!(unit));
+            ui.horizontal(|ui| {
+                ui.label("Label");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut label)
+                            .desired_width(ui.available_width() - 4.0),
+                    )
+                    .changed()
+                {
+                    set_style(&mut widget.style, "label", json!(label));
                     refresh = true;
                 }
+            });
+            if unit_context.is_none() && widget.kind != "track_map" {
+                let mut unit = style_string(&widget.style, "unit").unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.label("Unit text");
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut unit)
+                                .desired_width(ui.available_width() - 4.0),
+                        )
+                        .changed()
+                    {
+                        set_style(&mut widget.style, "unit", json!(unit));
+                        refresh = true;
+                    }
+                });
             }
             if widget.kind != "track_map" {
+                widgets::section_label(ui, "Scale");
                 let mut min = style_number(&widget.style, "min").unwrap_or(0.0);
                 let mut max = style_number(&widget.style, "max").unwrap_or(100.0);
                 ui.horizontal(|ui| {
@@ -459,41 +575,35 @@ impl OverlayEditor {
                     }
                 });
             }
-            ui.label("Position and size (normalized)");
+            widgets::section_label(ui, "Position & size");
+            widgets::hint(
+                ui,
+                "Fractions of the video frame. Drag on the preview to move; drag the corner to resize.",
+            );
             ui.horizontal(|ui| {
                 refresh |= ui
-                    .add(
-                        egui::DragValue::new(&mut widget.rect.x)
-                            .speed(0.005)
-                            .range(0.0..=1.0)
-                            .prefix("x "),
-                    )
+                    .add(widgets::percent_widget(&mut widget.rect.x, 0.0, 1.0, "X "))
                     .changed();
                 refresh |= ui
-                    .add(
-                        egui::DragValue::new(&mut widget.rect.y)
-                            .speed(0.005)
-                            .range(0.0..=1.0)
-                            .prefix("y "),
-                    )
+                    .add(widgets::percent_widget(&mut widget.rect.y, 0.0, 1.0, "Y "))
                     .changed();
             });
             ui.horizontal(|ui| {
                 refresh |= ui
-                    .add(
-                        egui::DragValue::new(&mut widget.rect.width)
-                            .speed(0.005)
-                            .range(0.02..=1.0)
-                            .prefix("w "),
-                    )
+                    .add(widgets::percent_widget(
+                        &mut widget.rect.width,
+                        0.02,
+                        1.0,
+                        "W ",
+                    ))
                     .changed();
                 refresh |= ui
-                    .add(
-                        egui::DragValue::new(&mut widget.rect.height)
-                            .speed(0.005)
-                            .range(0.02..=1.0)
-                            .prefix("h "),
-                    )
+                    .add(widgets::percent_widget(
+                        &mut widget.rect.height,
+                        0.02,
+                        1.0,
+                        "H ",
+                    ))
                     .changed();
             });
         }
@@ -511,7 +621,8 @@ impl OverlayEditor {
                 refresh |= self.clear_track_map_point(index, "finish");
             }
         }
-        if ui.button("Delete widget").clicked() {
+        ui.add_space(10.0);
+        if widgets::danger_button(ui, "Delete widget").clicked() {
             if let Some(project) = self.project_mut() {
                 project.widgets.remove(index);
             }

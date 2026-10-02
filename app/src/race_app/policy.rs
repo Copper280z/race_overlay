@@ -7,7 +7,7 @@ pub(super) use super::appearance_policy::{
     appearance_color_editor, appearance_for_preset, appearance_number, appearance_preset,
     appearance_preset_label, normalize_appearance, parse_unit_system, remove_style,
     reset_widget_appearance, set_appearance_number, set_appearance_string, set_style, style_string,
-    unit_name, unit_system_label, widget_appearance_ui,
+    unit_name, widget_appearance_ui,
 };
 pub(super) use super::export_policy::{codec_display_name, export_surface, format_time};
 pub(super) use super::source_policy::{

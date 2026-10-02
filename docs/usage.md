@@ -33,6 +33,30 @@ open "target/release/Race Overlay.app"
 The `.app` launches as a normal GUI application without a Terminal window. The
 unbundled executable remains available for debug output and command-line use.
 
+## The interface
+
+One header row holds the **Analysis / Overlay** switch, the commands for the
+current workspace, the name of the document being edited (when there is room;
+a dot marks unsaved changes), and a ⚙ menu with the **Metric / Imperial**
+default, the color **Theme**, keyboard shortcuts, and About. On macOS the header
+is also the window's title bar; Windows and Linux keep their native title bar.
+macOS also gets the system menu bar at the top of the screen (**File**, **View**,
+**Panels**, **Window**, **Help**) with the same commands and shortcuts:
+⌘O add files, ⇧⌘O open workspace, ⌥⌘O open video, ⌘S / ⇧⌘S save, ⌘1 / ⌘2 switch
+workspace, plus theme and unit choices under **View**. Windows and Linux use the
+in-window header for these commands. One status bar at
+the bottom reports messages, background work, export progress, and any issues
+(click the issue count to read and dismiss them).
+
+Keyboard shortcuts: **Space** plays or pauses, **◀ ▶** steps one video frame or
+telemetry sample, and **⌘/Ctrl S** saves the current workspace or project.
+Dropping files anywhere in the window imports them.
+
+Choose a color scheme (**Race Dark**, **Graphite**, or **Daylight**) in the ⚙
+menu; the choice is remembered. Menus that hold several settings (such as a plot's
+**Options**) stay open while you adjust them and close when you click outside.
+Daylight uses deeper run colors to keep traces readable on its light surfaces.
+
 ## Analysis: a quick comparison
 
 The app starts in **Analysis**. Nothing requires a saved track or video.
@@ -40,47 +64,84 @@ The app starts in **Analysis**. Nothing requires a saved track or video.
 1. Drop one or several XRK files, or use **Add files…**. Each file becomes a
    recording. Full circuit laps are read from logger metadata; out/in segments
    remain available but are not competitive. When an autocross log contains a
-   logger finish boundary, the estimated run begins at the sustained launch and
-   ends at that boundary; otherwise it receives a best-effort moving interval.
+   logger finish boundary, the estimated run begins 3 s before the sustained
+   launch, so the start line is inside it, and ends at that boundary; otherwise it receives a best-effort moving interval.
    Nearly stationary logs are marked noncompetitive. These estimates are not
    official timing-system results. When several telemetry files are imported
    together, every interval from those new recordings is selected initially.
-2. Check the runs/laps to compare in **Recordings & laps**. **Ref** pins the
-   comparison reference. **Select all** and **Deselect all** update every visible
-   interval at once. Match and alignment details are shown only beneath selected
+   The first import uses **Data Focus** when it has no video, leaving the space
+   for telemetry. An import with video uses **Quick Compare**. Later imports
+   and saved workspaces preserve your layout; add a video panel through
+   **Panels** or choose a layout preset when you want one.
+2. Check the runs/laps to compare in **Recordings & laps**. Each recording is a
+   card; a colored dot beside a checked lap is that run's color in plots and
+   maps. The star pins the comparison reference. **Select all** and **Clear**
+   update every visible interval at once. **est.** marks an estimated interval,
+   and **check** flags a lap whose course match or time alignment needs
+   attention; hover a checked lap for the full details. Match and alignment details are shown only beneath selected
    intervals. New imports do not replace a pinned reference.
-   When selected runs come from multiple files and no course gates exist, the
-   app automatically attempts to align each run's start to the reference.
-   Lateral acceleration is correlated in the traveled-distance domain first;
+   Lap rows stay on one line; hover a shortened name to read it in full.
+   Runs that cross the start gate are aligned at it. Otherwise, when selected
+   runs come from multiple files, the app automatically attempts to align each
+   run's start to the reference.
+   Standing starts are aligned where each run has traveled 3 m from rest;
+   traveled distance comes from speed and, unlike GPS position, does not drift
+   between runs. Otherwise lateral acceleration is correlated in the
+   traveled-distance domain;
    yaw rate and GPS speed are guarded fallbacks. A source without speed or GPS,
    such as a camera IMU, can instead align on sustained motion onset. Successful
    matches open in **Aligned time**. If a spatial match is not trustworthy, the
    app uses **Traveled distance** when every run supports it, or segment-relative
    time otherwise.
 3. A video is optional. Drop one log and one exported video together to pair
-   them, or use **Attach video** on the recording. Multiple imported videos
+   them, or use **Attach video…** on the recording. Multiple imported videos
    appear in a pairing selector; filenames are not used to guess synchronization.
+   A camera recording (INSV) can also come first. Its entry shows the video and
+   the camera's own telemetry, with the camera assumed to face the direction of
+   travel and levelled from its quietest stationary moment; if that is wrong,
+   open **Camera orientation** under **Video alignment**, change the forward
+   axis, trims, or interval, and apply it again. The vehicle-frame
+   lateral/longitudinal acceleration and rotation channels this creates are
+   what a logger is correlated against.
+   To compare that video with a logger, add the log to the same entry in any of
+   these ways: drop or **Add files…** a log recorded during the video (a log
+   whose session date and time overlap the camera file's, read from the INSV
+   file name and the logger's metadata, joins the video's entry on its own,
+   whichever was added first); **More ▸ Add data log…** on the entry; or
+   **Add data log…** in its **Video alignment**. The log becomes the entry's
+   clock, so its laps and gates stay valid, and the camera is synchronized to it
+   automatically once the camera audio match and orientation are done. A match
+   with Pearson r of at least 0.5 over at least 30 s of overlap is applied for
+   you; a weaker one is left as a candidate to review. Logs the date and time
+   cannot place, or that overlap more than one video, stay separate entries.
+   Device clocks can disagree by a minute or more, so the date and time only
+   decide pairing; the offset itself always comes from the signals. In
+   **Video alignment** you can pick other channels and **Estimate logger ↔
+   camera alignment** again, apply the candidate, or **Set the offset by hand**
+   (video time = logger time + offset; the camera's telemetry moves with it).
    For a separately logged run, select the recording and use the **Video
    alignment** section directly inside that recording's expanded row: add the
    matching camera telemetry and let audio alignment finish. Expand **Camera
-   orientation / vehicle axes**, choose a stationary interval and the sensor
-   axis pointing toward the vehicle's nose, then apply calibration. This creates
-   vehicle-frame lateral/longitudinal acceleration and rotation channels;
-   lateral acceleration becomes the preferred logger-to-camera correlation
-   pair when both sources provide it. Estimate the match over the complete
-   feasible overlap, inspect the signed Pearson result, and apply it. This keeps
-   the logger clock stable, so existing intervals and gates remain valid.
-4. Click or drag across a plot to scrub all linked panels. **Play linked**
+   orientation**, choose a stationary interval and the sensor
+   axis pointing toward the vehicle's nose, then apply calibration. Estimate the
+   match over the complete feasible overlap, inspect the signed Pearson result,
+   and apply it. This keeps the logger clock stable, so existing intervals and
+   gates remain valid. Before the first video frame (telemetry often starts a
+   fraction of a second earlier) the video pane holds the first frame and says
+   how long before the video starts that position is.
+4. Click or drag across a plot to scrub all linked panels. the play button in the transport bar at the bottom (or **Space**)
    advances the reference clock, with each video following its own run's
    corresponding point. Video selectors can follow the comparison selection or
    remain pinned to a particular lap. Uncheck **Linked** to inspect a video's
    independent exported-video timestamp. Left/right arrow keys step one video
    frame when frame-rate metadata is available, or one adjacent reference
    telemetry sample in a telemetry-only recording.
-5. **Panels / layout** adds channel plots, X/Y scatter plots, delta plots,
+5. The **Panels** menu adds channel plots, X/Y scatter plots, delta plots,
    videos, maps, statistics, and setup panels. Drag tab headers to split, tab,
-   reorder, or float panels. Try
-   **Quick Compare**, **Data Focus**, or **Video Compare** for a fresh layout.
+   reorder, or float panels. Choose
+   **Quick Compare**, **Data Focus**, or **Video Compare** under **Layout
+   presets** for a fresh layout: recordings on the left, plots in the middle, and
+   maps and values on the right.
 6. Save a `.race-analysis.json` workspace to retain recordings, video offsets,
    intervals, selections, reference, gates, anchors, and panel settings/layout.
    Media remains external. Paths beneath the workspace's folder are saved
@@ -91,7 +152,8 @@ The app starts in **Analysis**. Nothing requires a saved track or video.
 ### Clocks, distance, and synchronization
 
 - **Elapsed time** starts at zero for each selected interval. With multiple
-  files and no course gates, **Aligned time** first compares lateral acceleration
+  files and no start-gate crossing, **Aligned time** times standing starts 3 m
+  from rest. Other runs compare lateral acceleration
   against traveled distance, so a faster or slower run does not get aligned by
   its middle. Yaw rate and speed are accepted only as confident spatial
   fallbacks. Spatial peaks near the search boundary or too far from the run
@@ -109,19 +171,19 @@ The app starts in **Analysis**. Nothing requires a saved track or video.
   or GPS distance, in that order. Different driving lines can accumulate different
   distances, so this is not the same as comparing identical course locations.
 - **Time gain / loss** shows candidate elapsed time minus reference elapsed time
-  at matched course positions: negative is ahead, positive is behind. When GPS
-  gates have been applied, each curve is clipped to the gate-defined run and
-  rebased to zero at the first jointly covered position after the start gate.
+  at matched course positions: negative is ahead, positive is behind. When both
+  runs cross the start gate, elapsed time is measured from it and the curve is
+  zero at the gate.
   `delta_time` is also available in an ordinary channel plot, so it can be
   stacked with other selected series.
 
-The toolbar always displays **Reference elapsed s**, even when plots use meters.
-Video labels show exported-video seconds. In **Timing / course**, the convention
+The transport bar always displays the reference elapsed time, even when plots use meters.
+Video labels show exported-video seconds. In **Timing & course setup**, the convention
 is `video time = recording time + video offset`; source offsets are
 `source time − recording time`. These controls accept signed values. Use
 **Match one visible event** for a direct video/log offset. Automatic audio and
 channel-correlation synchronization, including signed correlation coefficients,
-remain available through **Edit overlay / advanced sync**. Returning to Analysis updates
+remain available through **Edit overlay** on the selected recording. Returning to Analysis updates
 only that recording. The Overlay editor still defines `0.0 s` as the first
 exported-video frame.
 
@@ -135,23 +197,25 @@ coverage; traveled-distance integration omits unobserved travel across outages.
 
 ### Intervals, gates, and channels
 
-In **Timing / course**, refine each interval with signed numeric start/finish
-controls or drag its timeline endpoints. Optionally capture a directed GPS gate
-at the reference playhead: one gate extracts circuit crossing-to-crossing laps,
-while start and finish gates extract point-to-point runs. Set gate width and
-direction, then **Apply gates to all recordings**. Recordings without valid
-crossings retain their existing intervals, and the status line reports matched
-and unmatched recording counts. Continuous plot channels are interpolated at
-the exact resulting interval boundaries rather than beginning at the next sensor
-sample. The capture controls identify the pinned recording and interval
-explicitly so a visible non-reference video cannot be mistaken for the gate
-source. Applying gates resets the reference playhead and analysis range.
-**Restore detected intervals** removes the gate-created run
-windows without changing the gate coordinates, which makes it possible to seek
-outside a bad window and recapture a gate. **Clear gates & restore intervals**
-does both. Gate application and re-detection preserve segment identity by
-matching time overlap and retain the existing selection whenever those
-intervals still exist; they do not automatically add the final run. Thus the
+In **Timing & course setup**, whose **Intervals**, **Sources & sync**, and
+**Course gates** tabs group these controls, refine each interval with signed numeric start/finish
+controls or drag its timeline endpoints.
+
+On **Course gates**, scrub the reference to a timing line and capture it as the
+start or finish gate; each gate has a position, travel direction, and width.
+Gates never trim intervals. Every compared run that crosses the start gate is
+time-aligned at that crossing, including runs added later, and charts mark the
+reference's start and finish crossings with dashed lines. Each trace is dimmed
+before its own start-gate crossing and after its finish-gate crossing, but all
+of its data stays visible. A run that does not cross the start gate inside its
+interval is flagged and falls back to best-effort alignment. With a single
+circuit gate, **Split laps at gate** replaces every recording's intervals with
+laps between consecutive crossings; recordings without two crossings keep
+their intervals. **Restore detected intervals** re-runs logger-lap or motion
+detection. **Playhead + n s** captures before or after the playhead (up to
+120 s, only where the reference has GPS), for a gate just outside the interval.
+Splitting and re-detection preserve segment identity by matching time overlap
+and keep the existing selection whenever those intervals still exist, so the
 pinned reference does not silently jump to another file.
 
 Plots can contain any selected channels; each channel has its own vertical
@@ -161,7 +225,15 @@ different channel names across files. Units are converted, never just relabeled;
 plot and map units can override the app's Metric/Imperial default. Pinch and
 wheel zoom affect only the shared horizontal comparison axis; dragging either
 axis scales that axis directly, with vertical scale remaining independent per
-plot. Double-click resets a plot. Plot controls and legends can be collapsed, legends can be hidden,
+plot. Double-click resets a plot. Long recordings are drawn at screen resolution
+(each pixel column keeps its minimum and maximum, so peaks stay visible) and zooming in
+shows the underlying samples. A plot can list a channel no loaded source has (the default
+plot lists GPS speed and RPM); **Channels** still shows it so it can be unticked, and the
+empty row has **Remove from plot**. Each plot's header has **Channels** and
+**Options** menus (smoothing, units and channel matching, legend); stacked plots
+show one shared legend. A legend that would cover too much of the plot folds
+into **Legend (N)** in its corner; open it to scroll the runs and toggle traces.
+Legends can be hidden,
 and each run's legend text can be edited from the controls or the plot's
 right-click menu. X/Y scatter panels select independent X and Y channels and can
 optionally color samples by a third channel using a shared Z color scale.
@@ -170,9 +242,13 @@ Source filtering is staged until **Reload & apply**. Each plot and channel map
 can also enable its own low-pass filter. All filters are optional, zero-phase,
 non-causal, and operate in time before distance resampling. Discrete channels
 are not smoothed. GPS course geometry uses original positions rather than
-source-smoothed coordinates. **Range start / Range finish** define a common
+source-smoothed coordinates. The **Stats range** menu in the transport bar (**Start here**, **Finish here**,
+**Clear**) defines a common
 reference range for the statistics panel; unavailable matched ranges are shown
 as unavailable, not replaced silently by whole-run statistics.
+Statistics columns are resizable: drag a header divider, or double-click it to
+reset that column. Widths are shared across the run cards in that panel and saved
+with the workspace. Narrow cells stay on one line; hover to read a full value.
 
 CSV imports default to a header row and first-column seconds. For typed channels,
 use **CSV columns / units (advanced)** in setup. For example:
@@ -202,23 +278,35 @@ course or GPS map panel has its own **Color range** control. Leave **Auto** on
 to use the displayed runs' minimum and maximum, or turn it off and enter labeled
 minimum and maximum values. Turn the split off to overlay traces instead. Choose
 any numeric channel, an optional display filter, unit, and manual color range.
-**GPS imagery** instead draws actual recorded positions. A single **Map controls**
-row expands the data, imagery, view, and scale settings; when collapsed, the
-scale or run legend is drawn over the map instead of reserving header space.
+**GPS imagery** instead draws actual recorded positions. The header switches
+between **Channel** and **Runs** coloring and picks the channel; its **Options**
+menu holds smoothing, units, layout, rotation, color range, and imagery. The
+color scale is drawn top-right and the run legend bottom-left, over the map.
 Click a trace to scrub, left-drag to pan, and use the wheel or pinch gesture to
 zoom about the pointer. Right-click a map for the most common view/color
 controls, and use **Fit** to reset.
 
-For a continental-US course, use the imagery panel's USGS download action to
-save an aerial image, geographic bounds, and attribution in a local assets
-folder. An internet connection is required only for the download; saved images
-work offline. Before a workspace is saved, downloads use Race Overlay's writable
-per-user application-data folder; saved workspaces use an adjacent `.assets`
-folder. Existing map images can be imported as PNG/JPEG and registered
-using geographic bounds or three non-collinear image/GPS control points. Bounds
-use a north-up Web Mercator image; control points support rotated images.
-Geographic registration is independent of the simplified course map. Downloads
-are limited to course-sized areas (30 km across), not whole regions. Local
+On a **GPS imagery** map, **Get US aerial image** supplies a continental-US
+course background. Race Overlay first looks in its per-user imagery cache and
+reuses any saved image that covers the course, so the same venue is downloaded
+from USGS only once, even across workspaces. Only a miss contacts the network.
+The image (with its geographic bounds and attribution) is also copied beside the
+workspace, in an adjacent `.assets` folder once saved, so saved workspaces do
+not depend on the cache. **Re-download** ignores the cache and fetches a fresh
+copy. The cache lives in the application-data folder
+(`~/Library/Application Support/Race Overlay/Imagery Cache` on macOS,
+`%LOCALAPPDATA%\Race Overlay\Imagery Cache` on Windows, and
+`$XDG_DATA_HOME/race-overlay/Imagery Cache` or `~/.local/share/race-overlay/Imagery Cache`
+on Linux); delete it at any time to reclaim space. Existing map images can be
+imported as PNG/JPEG and registered using geographic bounds or three
+non-collinear image/GPS control points. Bounds use a north-up Web Mercator image;
+control points support rotated images. Geographic registration is independent of
+the simplified course map. Downloads are limited to course-sized areas (30 km
+across), not whole regions. A GPS imagery map overlays all selected runs by
+default and fits itself to the reference run's venue; selected runs recorded
+elsewhere (more than about 5 km away) are hidden with a note. The background
+image loads automatically whenever the map is visible.
+Local
 imagery and telemetry are not embedded in the workspace JSON.
 
 Video viewers use persistent independent decoders and bounded frame caches,
@@ -236,9 +324,9 @@ Select **Overlay** in the mode bar for the original editor, or choose
    X4 Air dual-track INSV for direct processing (see below).
 2. Add one or more telemetry sources. For an Insta360 recording, select the
    matching LRV when available; it is much smaller than the INSV and contains
-   the same sensor trailer. For an AiM logger, use **+ MyChron XRK** and select
+   the same sensor trailer. For an AiM logger, choose **Add ▸ MyChron XRK** in the Data sources panel and select
    the original uncompressed `.xrk` file.
-   Select a source and use **Remove source** to remove it. Removal clears that
+   Select a source and use **Remove source…** at the bottom of its settings to remove it. Removal clears that
    source's plot selections and widget bindings, but leaves the video, widgets,
    and other telemetry sources intact.
 3. When an Insta360 source is longer than the Studio export, the editor
@@ -270,14 +358,14 @@ Select **Overlay** in the mode bar for the original editor, or choose
    lags where the selected channels can overlap. Channel selectors show sample
    count and duration and prefer dense continuous sensors over sparse lap
    metadata.
-5. Add individual widgets, or use **+ MyChron dashboard** to append a complete
+5. Add individual widgets, or use **Add ▸ MyChron dashboard** in the Widgets panel to append a complete
    pre-arranged set without removing anything already on the canvas. The preset
    binds RPM/shift lights, speed, gear, G, water temperature, EGT, lap time,
    delta, and steering when those channels are available. Widgets can be bound
    to any source channel, dragged, and resized directly over the preview.
    Foreground opacity controls the data, labels, ticks, and lamps; background
    opacity independently controls the rounded panel behind the widget.
-   Choose the default **Metric** or **Imperial** unit system in the toolbar.
+   Choose the default **Metric** or **Imperial** unit system in the ⚙ menu.
    Bound widgets also have a compatible display-unit selector, so an individual
    speed, temperature, pressure, distance, angle, time, or acceleration widget
    can override the default without relabeling unconverted data.

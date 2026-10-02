@@ -11,6 +11,12 @@ pub(crate) fn unsaved_analysis_imagery_dir() -> PathBuf {
     application_data_dir().join("Imagery")
 }
 
+/// Shared, per-user cache of downloaded aerial imagery. Any workspace covering
+/// the same course reuses an image from here instead of requesting it again.
+pub(crate) fn imagery_cache_dir() -> PathBuf {
+    application_data_dir().join("Imagery Cache")
+}
+
 #[cfg(target_os = "macos")]
 fn application_data_dir() -> PathBuf {
     absolute_env_path("HOME")

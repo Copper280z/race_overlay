@@ -11,6 +11,7 @@ pub mod processing;
 pub mod project;
 pub mod telemetry;
 pub mod video;
+mod wall_clock;
 mod xrk;
 
 pub use adapters::*;
@@ -21,3 +22,4 @@ pub use processing::*;
 pub use project::*;
 pub use telemetry::*;
 pub use video::*;
+pub use wall_clock::*;
