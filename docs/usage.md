@@ -293,10 +293,34 @@ Click a trace to scrub, left-drag to pan, and use the wheel or pinch gesture to
 zoom about the pointer. Right-click a map for the most common view/color
 controls, and use **Fit** to reset.
 
-On a **GPS imagery** map, **Get US aerial image** supplies a continental-US
-course background. Race Overlay first looks in its per-user imagery cache and
-reuses any saved image that covers the course, so the same venue is downloaded
-from USGS only once, even across workspaces. Only a miss contacts the network.
+On a **GPS imagery** map, **Get aerial image** supplies a course background
+from the first imagery source that covers the course. USGS National Map
+imagery (continental US) is built in as the fallback. Many state and county GIS
+offices publish sharper, more recent orthoimagery as ArcGIS services.
+**Find imagery…** searches Esri's public ArcGIS Online catalog for them near the
+course and lists, in Settings, only services that actually return imagery of the
+course: each is asked to describe itself and to draw a small sample, so dead
+links, sign-in-only services, infrared layers, and layers without imagery
+there are hidden. Publishers rarely register every year they fly, so the other
+services in the same server folder as a match (for example New York's other
+flight years) are checked too. Results are grouped as local, county,
+statewide, or national, local first, and within a group the most recent year
+in the name comes first ("latest" counts as newest); **Add** keeps one. The search sends the catalog the course area rounded outward to
+0.1°, and only when you click the button. A service the catalog lacks can be
+added by pasting its link under **Settings ▸ Your imagery sources** (the ⚙
+menu, or **Race Overlay ▸ Settings…** on macOS): the service page, its export
+address, a layer, or the WMS link ArcGIS publishes beside it, for example New
+York's `https://orthos.its.ny.gov/arcgis/rest/services/wms/Latest/MapServer`.
+Both drawn-on-request services and hosted tile layers (stitched from Web
+Mercator tiles) work. Race Overlay remembers each source's name, coverage,
+attribution, and size limit for every workspace. Sources are tried in list
+order and can be renamed, switched off, reordered, re-linked, or removed. A
+source whose coverage cannot be read (an unusual projection) is tried for every
+course. An image covers the course at up to 4096 pixels across.
+
+Race Overlay first looks in its per-user imagery cache and reuses any saved
+image from the chosen source that covers the course, so the same venue is
+downloaded only once, even across workspaces. Only a miss contacts the network.
 The image (with its geographic bounds and attribution) is also copied beside the
 workspace, in an adjacent `.assets` folder once saved, so saved workspaces do
 not depend on the cache. **Re-download** ignores the cache and fetches a fresh

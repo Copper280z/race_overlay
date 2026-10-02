@@ -91,6 +91,13 @@ impl NativeMenu {
             .append_items(&[
                 &PredefinedMenuItem::about(Some("About Race Overlay"), Some(about)),
                 &PredefinedMenuItem::separator(),
+                &b.item(
+                    "settings",
+                    "Settings…",
+                    MenuCommand::OpenSettings,
+                    accel(cmd, Code::Comma),
+                ),
+                &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::services(None),
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::hide(None),

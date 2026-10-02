@@ -36,6 +36,7 @@ pub enum MenuCommand {
     LayoutPreset(usize),
     OpenWebsite,
     OpenFfmpegLicensing,
+    OpenSettings,
 }
 
 /// What the menu needs to show check marks and enable/disable entries.

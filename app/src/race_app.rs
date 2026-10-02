@@ -49,6 +49,7 @@ pub struct RaceOverlayApp {
     window_title: String,
     /// Absent in headless tests, where there is no main-thread menu bar.
     menu: Option<crate::native_menu::NativeMenu>,
+    settings: crate::settings_window::SettingsWindow,
 }
 
 impl RaceOverlayApp {
@@ -64,13 +65,19 @@ impl RaceOverlayApp {
             .unwrap_or(&theme::THEMES[0]);
         theme::apply(&cc.egui_ctx, &chosen.palette);
         let editor = OverlayEditor::new(cc);
+        let mut analysis = crate::analysis_app::AnalysisApp::new();
+        analysis.imagery_sources = crate::imagery_sources::load(
+            cc.storage
+                .and_then(|storage| storage.get_string(crate::imagery_sources::STORAGE_KEY)),
+        );
         Self {
-            analysis: crate::analysis_app::AnalysisApp::new(),
+            analysis,
             analysis_mode: true,
             seen_editor_status: editor.status().to_owned(),
             editor,
             window_title: String::new(),
             menu: native_menu.then(|| crate::native_menu::NativeMenu::install(&cc.egui_ctx)),
+            settings: Default::default(),
         }
     }
 
@@ -240,6 +247,10 @@ impl RaceOverlayApp {
                         }
                     }
                 });
+            widgets::section_label(ui, "Imagery");
+            if ui.button("Aerial imagery sources…").clicked() {
+                self.settings.open = true;
+            }
             widgets::section_label(ui, "Keyboard");
             for (keys, action) in [
                 ("Space", "Play / pause"),
@@ -376,6 +387,7 @@ impl RaceOverlayApp {
                     }
                 }
                 MenuCommand::SetUnits(units) => self.set_unit_system(units),
+                MenuCommand::OpenSettings => self.settings.open = true,
                 MenuCommand::AddPanel(choice) => {
                     self.set_mode(true);
                     self.analysis.add_panel(choice);
@@ -476,6 +488,10 @@ impl eframe::App for RaceOverlayApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(theme::STORAGE_KEY, theme::active().id.into());
         storage.set_string(
+            crate::imagery_sources::STORAGE_KEY,
+            crate::imagery_sources::save(&self.analysis.imagery_sources),
+        );
+        storage.set_string(
             UNIT_SYSTEM_STORAGE_KEY,
             match self.unit_system() {
                 UnitSystem::Metric => "metric",
@@ -494,6 +510,7 @@ impl eframe::App for RaceOverlayApp {
         self.sync_window_title(&ctx);
         self.header(ui);
         self.status_bar(ui);
+        self.settings.show(&ctx, &mut self.analysis.imagery_sources);
         if self.analysis_mode {
             self.analysis
                 .ui(ui, self.editor.tools(), self.unit_system());

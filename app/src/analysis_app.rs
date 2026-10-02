@@ -87,6 +87,9 @@ pub struct AnalysisApp {
     automatic_mode: bool,
     initial_layout_pending: bool,
     setup_tab: setup::SetupTab,
+    /// Aerial imagery services added in Settings; owned by the application
+    /// shell's preferences and handed in here because maps use them.
+    pub(crate) imagery_sources: Vec<crate::imagery_sources::ImagerySource>,
 }
 impl AnalysisApp {
     pub fn new() -> Self {
@@ -135,6 +138,7 @@ impl AnalysisApp {
             automatic_mode: true,
             initial_layout_pending: true,
             setup_tab: Default::default(),
+            imagery_sources: Vec::new(),
         };
         app.layout(1);
         app.dirty = false;

@@ -1,4 +1,4 @@
-use crate::analysis_imagery::{GeoBounds, ImageryConfig, ImageryController};
+use crate::analysis_imagery::{GeoBounds, ImageryConfig, ImageryContext, ImageryController};
 use crate::ui_kit::{Tone, widgets};
 use egui::{Color32, Pos2};
 use overlay_core::{
@@ -7,7 +7,6 @@ use overlay_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
-use std::path::Path;
 
 pub struct MapTrace {
     pub segment: SegmentRef,
@@ -389,7 +388,7 @@ impl MapPanel {
         ui: &mut egui::Ui,
         traces: &[MapTrace],
         config: &mut MapSettings,
-        asset_dir: &Path,
+        imagery: &ImageryContext<'_>,
     ) {
         let geographic_bounds = bounds(&venue_traces(traces));
         widgets::section_label(ui, "Layout");
@@ -449,7 +448,7 @@ impl MapPanel {
         }
         if config.actual_gps {
             self.imagery
-                .ui(ui, &mut config.imagery, geographic_bounds, asset_dir);
+                .ui(ui, &mut config.imagery, geographic_bounds, imagery);
         }
     }
     pub fn ui(
@@ -459,7 +458,7 @@ impl MapPanel {
         reference: Option<&ReferenceCourse>,
         channel_label: &str,
         config: &mut MapSettings,
-        asset_dir: &Path,
+        imagery: &ImageryContext<'_>,
     ) -> Option<MapSelection> {
         let visible = if config.actual_gps {
             venue_traces(traces)
@@ -482,7 +481,7 @@ impl MapPanel {
                         ui,
                         &mut config.imagery,
                         geographic_bounds,
-                        asset_dir,
+                        imagery,
                         false,
                     );
                 });

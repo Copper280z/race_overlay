@@ -1601,8 +1601,12 @@ impl AnalysisApp {
             .as_ref()
             .map(|p| p.with_extension("assets"))
             .unwrap_or_else(crate::app_paths::unsaved_analysis_imagery_dir);
+        let imagery = crate::analysis_imagery::ImageryContext {
+            asset_dir: &asset_dir,
+            sources: &self.imagery_sources,
+        };
         self.map_header(
-            ui, id, channel, settings, units, &mut panel, &traces, &asset_dir,
+            ui, id, channel, settings, units, &mut panel, &traces, &imagery,
         );
         let unit = target_unit;
         let label = format!("{} ({})", channel, unit.as_ref().map_or("", Unit::symbol));
@@ -1612,7 +1616,7 @@ impl AnalysisApp {
             self.prepared.course.as_ref(),
             &label,
             settings,
-            &asset_dir,
+            &imagery,
         );
         if let Some(selected) = selected
             && let Some(run) = self
@@ -1641,7 +1645,7 @@ impl AnalysisApp {
         units: UnitSystem,
         panel: &mut crate::analysis_maps::MapPanel,
         traces: &[MapTrace],
-        asset_dir: &Path,
+        imagery: &crate::analysis_imagery::ImageryContext<'_>,
     ) {
         // Narrow panels fold everything into one menu (a single short row);
         // wide ones show the mode and channel pickers inline.
@@ -1651,7 +1655,7 @@ impl AnalysisApp {
                 if settings.color_mode == MapColorMode::Value {
                     self.map_value_options(ui, id, channel, settings, units);
                 }
-                panel.options_ui(ui, traces, settings, asset_dir);
+                panel.options_ui(ui, traces, settings, imagery);
             });
             return;
         }
@@ -1661,7 +1665,7 @@ impl AnalysisApp {
                 if settings.color_mode == MapColorMode::Value {
                     self.map_value_options(ui, id, channel, settings, units);
                 }
-                panel.options_ui(ui, traces, settings, asset_dir);
+                panel.options_ui(ui, traces, settings, imagery);
             });
         });
     }

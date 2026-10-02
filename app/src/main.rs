@@ -7,8 +7,11 @@ mod analysis_app;
 mod analysis_imagery;
 mod analysis_maps;
 mod app_paths;
+mod imagery_search;
+mod imagery_sources;
 mod native_menu;
 mod race_app;
+mod settings_window;
 mod ui_kit;
 mod video_processing;
 

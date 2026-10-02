@@ -50,6 +50,11 @@ subject to the live-preview release gate described in `docs/raw-video.md`.
   - `analysis_decimate.rs`: reduces plot lines to screen resolution per view.
     Prepared series stay complete; only what egui draws is reduced.
   - `analysis_maps.rs`, `analysis_imagery.rs`: map interaction and registration.
+  - `imagery_sources.rs`: user-added ArcGIS imagery services (USGS is the
+    built-in fallback) and fetching an image from one, drawn or tiled;
+    `imagery_search.rs` finds and verifies services near a course in the
+    ArcGIS Online catalog; `settings_window.rs` edits them. Sources are
+    app-level preferences saved in eframe storage, not workspace data.
   - `ui_kit/`: the shared theme and small widgets (segmented control, cards,
     chips, popovers). Panels take colors from `theme::surface`, `theme::text`,
     `theme::accent()`, and `Tone`, never from literals. A color scheme is one
