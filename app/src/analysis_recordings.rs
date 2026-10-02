@@ -446,6 +446,20 @@ impl AnalysisApp {
         if !self.workspace.course.gates.is_empty() && run.start_gate.is_none() {
             notes.push((Tone::Warn, "Does not cross the start gate".into()));
         }
+        if let Some(drift) = &run.gps_drift {
+            let method = match drift.method {
+                GpsDriftMethod::Staging => "staging",
+                GpsDriftMethod::PathFit => "path fit",
+            };
+            notes.push((
+                Tone::Neutral,
+                format!("GPS drift: {:.1} m ({method})", drift.meters()),
+            ));
+        } else if self.workspace.course.correct_gps_drift
+            && self.workspace.reference.as_ref() != Some(&run.key)
+        {
+            notes.push((Tone::Warn, "GPS drift not found".into()));
+        }
         if !self.prepared.automatic_time_alignment {
             return notes;
         }

@@ -214,6 +214,13 @@ laps between consecutive crossings; recordings without two crossings keep
 their intervals. **Restore detected intervals** re-runs logger-lap or motion
 detection. **Playhead + n s** captures before or after the playhead (up to
 120 s, only where the reference has GPS), for a gate just outside the interval.
+**Correct GPS drift** (off by default) shifts each compared run's GPS onto the
+reference, because consumer GPS positions drift by metres between runs while
+staying steady within one. Standing starts use their shared staging spot;
+other runs fit their whole path onto the reference's, which needs a path that
+turns, not a straight line. The correction applies to maps, course matching,
+and gate crossings; raw data and lap splitting are unchanged. Each run's notes
+show the shift and method, or say when no estimate was found.
 Splitting and re-detection preserve segment identity by matching time overlap
 and keep the existing selection whenever those intervals still exist, so the
 pinned reference does not silently jump to another file.

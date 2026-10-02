@@ -91,6 +91,13 @@ impl AnalysisApp {
             });
         });
         ui.add_space(6.0);
+        outcome.changed |= ui
+            .checkbox(
+                &mut self.workspace.course.correct_gps_drift,
+                "Correct GPS drift",
+            )
+            .on_hover_text("Shift each run onto the reference by staging spot or path")
+            .changed();
         self.anchor_controls(ui, outcome);
     }
 

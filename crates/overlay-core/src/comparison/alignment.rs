@@ -474,9 +474,8 @@ fn onset_time_alignment(
 /// short enough that differing launches still show.
 const STANDING_START_METERS: f64 = 3.0;
 
-/// Whether the run is stationary for its first second: a standing start.
 fn starts_at_rest(run: &PreparedComparisonRun) -> bool {
-    time_at_progress(&run.distance, 0.5).is_some_and(|time| time - run.start >= 1.0)
+    super::drift::starts_at_rest(&run.distance, run.start)
 }
 
 /// Standing starts from a shared staging spot: time each run where it has
@@ -543,6 +542,7 @@ mod tests {
             time_alignment: None,
             start_gate: None,
             finish_gate: None,
+            gps_drift: None,
         }
     }
 

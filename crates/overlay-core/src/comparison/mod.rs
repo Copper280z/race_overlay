@@ -44,6 +44,8 @@ pub struct PreparedComparisonRun {
     /// inside its interval, when it does.
     pub start_gate: Option<f64>,
     pub finish_gate: Option<f64>,
+    /// The drift removed from `gps`, when correction is on and it was found.
+    pub gps_drift: Option<GpsDrift>,
 }
 
 #[derive(Default)]
@@ -54,9 +56,12 @@ pub struct PreparedComparison {
 }
 
 mod alignment;
+mod drift;
 mod sampling;
 
 use alignment::best_effort_time_alignment;
+use drift::{DriftTrack, LocalFrame, estimate_drift};
+pub use drift::{GpsDrift, GpsDriftMethod};
 use sampling::run_gate_times;
 use sampling::timed_samples_inside_interval;
 pub use sampling::{gate_laps, gps_inside_interval, segment};
@@ -97,18 +102,14 @@ pub fn prepare_comparison(
         .collect::<HashSet<_>>()
         .len()
         > 1;
-    let mut runs = keys
+    // Each run's GPS and traveled distance; traveled distance does not
+    // depend on where the GPS sits, so drift can be removed afterwards.
+    let mut bases = keys
         .iter()
         .filter_map(|key| {
             let (r, s) = segment(workspace, key)?;
             let dataset = &data.get(&r.primary_source)?.raw;
             let track = gps_points(dataset, r);
-            let (start_gate, finish_gate) = run_gate_times(
-                &track,
-                &workspace.course.gates,
-                s.start_recording_time,
-                s.end_recording_time,
-            );
             let gps = gps_inside_interval(&track, s.start_recording_time, s.end_recording_time);
             let traveled = traveled_distance(dataset, r, &gps);
             let in_range = timed_samples_inside_interval(
@@ -133,7 +134,69 @@ pub fn prepare_comparison(
                         1.0
                     },
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            Some(RunBasis {
+                key,
+                recording: r,
+                segment: s,
+                track,
+                gps,
+                distance,
+                drift: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    if workspace.course.correct_gps_drift
+        && let Some(reference) = &workspace.reference
+        && let Some(index) = bases.iter().position(|basis| basis.key == reference)
+        && let Some(origin) = bases[index].gps.first()
+    {
+        let frame = LocalFrame::new(origin);
+        let reference_basis = &bases[index];
+        let (reference_gps, reference_distance, reference_start) = (
+            reference_basis.gps.clone(),
+            reference_basis.distance.clone(),
+            reference_basis.segment.start_recording_time,
+        );
+        let reference_track = DriftTrack {
+            gps: &reference_gps,
+            distance: &reference_distance,
+            start: reference_start,
+        };
+        for basis in bases.iter_mut().filter(|basis| basis.key != reference) {
+            basis.drift = estimate_drift(
+                &frame,
+                &reference_track,
+                &DriftTrack {
+                    gps: &basis.gps,
+                    distance: &basis.distance,
+                    start: basis.segment.start_recording_time,
+                },
+            );
+            if let Some(drift) = &basis.drift {
+                frame.correct(&mut basis.track, drift);
+                frame.correct(&mut basis.gps, drift);
+            }
+        }
+    }
+    let mut runs = bases
+        .into_iter()
+        .map(|basis| {
+            let RunBasis {
+                key,
+                recording: r,
+                segment: s,
+                track,
+                gps,
+                distance,
+                drift: gps_drift,
+            } = basis;
+            let (start_gate, finish_gate) = run_gate_times(
+                &track,
+                &workspace.course.gates,
+                s.start_recording_time,
+                s.end_recording_time,
+            );
             let progress = course
                 .as_ref()
                 .map(|c| {
@@ -159,7 +222,7 @@ pub fn prepare_comparison(
                     }
                 })
                 .unwrap_or_default();
-            Some(PreparedComparisonRun {
+            PreparedComparisonRun {
                 key: key.clone(),
                 name: format!("{} / {}", r.name, s.name),
                 start: s.start_recording_time,
@@ -170,7 +233,8 @@ pub fn prepare_comparison(
                 time_alignment: None,
                 start_gate,
                 finish_gate,
-            })
+                gps_drift,
+            }
         })
         .collect::<Vec<_>>();
     if let Some(reference) = &workspace.reference
@@ -193,6 +257,18 @@ pub fn prepare_comparison(
         course,
         automatic_time_alignment,
     }
+}
+
+/// One compared run before its course position and gate crossings are found.
+struct RunBasis<'a> {
+    key: &'a SegmentRef,
+    recording: &'a Recording,
+    segment: &'a RunSegment,
+    /// The whole recording's GPS, and the part inside the interval.
+    track: Vec<GpsPoint>,
+    gps: Vec<GpsPoint>,
+    distance: Vec<ProgressSample>,
+    drift: Option<GpsDrift>,
 }
 
 /// Places the run's start-gate crossing at the reference's. A shared physical

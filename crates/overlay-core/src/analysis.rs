@@ -151,6 +151,10 @@ pub struct CourseDefinition {
     pub gates: Vec<Gate>,
     #[serde(default)]
     pub manual_anchors: Vec<ManualAnchor>,
+    /// Opt-in: shift each compared run's GPS onto the reference to remove
+    /// position drift between runs (see `comparison::drift`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub correct_gps_drift: bool,
     #[serde(default, flatten)]
     pub unknown: BTreeMap<String, Value>,
 }

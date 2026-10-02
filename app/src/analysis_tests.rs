@@ -261,6 +261,7 @@ fn regular_plot_delta_is_measured_from_the_start_gate() {
         time_alignment: None,
         start_gate: Some(times[0]),
         finish_gate: None,
+        gps_drift: None,
     };
     let mut app = AnalysisApp::new();
     app.workspace.reference = Some(reference_key.clone());
@@ -327,6 +328,7 @@ fn scatter_aligns_xy_and_optional_z_on_recording_time() {
         time_alignment: None,
         start_gate: None,
         finish_gate: None,
+        gps_drift: None,
     }];
     app.data
         .insert(source_id, SourceData::from_dataset(Arc::new(dataset)));
@@ -418,6 +420,7 @@ fn gate_capture_uses_pinned_reference_even_when_prepared_runs_are_stale() {
         time_alignment: None,
         start_gate: None,
         finish_gate: None,
+        gps_drift: None,
     }];
 
     let (recording_id, name, time, gate) = app.reference_gate_capture(0.0).unwrap();
@@ -677,6 +680,7 @@ fn plot_traces_mark_pieces_before_the_start_gate_as_outside() {
         time_alignment: None,
         start_gate: Some(1.5),
         finish_gate: None,
+        gps_drift: None,
     }];
     app.data
         .insert(source_id, SourceData::from_dataset(Arc::new(dataset)));
@@ -687,6 +691,89 @@ fn plot_traces_mark_pieces_before_the_start_gate_as_outside() {
     assert_eq!(traces[0].outside_gates, vec![true, false]);
     assert_eq!(xs(&traces[0].points[0]), vec![0.0, 1.0]);
     assert_eq!(xs(&traces[0].points[1]), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn gps_drift_correction_is_opt_in_and_moves_runs_onto_the_reference() {
+    // Two seconds staged, then 40 m north and 40 m east, at 10 Hz; the
+    // candidate's GPS reads 2 m east and 1 m south of the reference's.
+    let dataset = |source_id, drift: [f64; 2]| {
+        let path = (0..20)
+            .map(|_| [0.0, 0.0])
+            .chain((1..=40).map(|step| [0.0, step as f64]))
+            .chain((1..=40).map(|step| [step as f64, 40.0]))
+            .collect::<Vec<_>>();
+        let cos = 42f64.to_radians().cos();
+        let channel = |name: &str, values: Vec<f64>| TelemetryChannel {
+            descriptor: ChannelDescriptor {
+                id: ChannelId::new(),
+                name: name.into(),
+                quantity: Quantity::Position,
+                unit: Unit::Degree,
+                interpolation: Interpolation::Linear,
+                description: None,
+            },
+            series: ChannelSeries::new(
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| TimedSample {
+                        time: index as f64 * 0.1,
+                        value,
+                    })
+                    .collect(),
+            ),
+        };
+        let mut dataset = TelemetryDataset {
+            source_id,
+            ..Default::default()
+        };
+        dataset.insert(channel(
+            "gps_latitude",
+            path.iter()
+                .map(|point| 42.0 + (point[1] + drift[1]) / 111_320.0)
+                .collect(),
+        ));
+        dataset.insert(channel(
+            "gps_longitude",
+            path.iter()
+                .map(|point| -76.0 + (point[0] + drift[0]) / (111_320.0 * cos))
+                .collect(),
+        ));
+        SourceData::from_dataset(Arc::new(dataset))
+    };
+    let (reference_source, candidate_source) = (SourceId::new(), SourceId::new());
+    let (mut reference, reference_key) =
+        recording("reference", source("reference", reference_source), "run");
+    let (mut candidate, candidate_key) =
+        recording("candidate", source("candidate", candidate_source), "run");
+    reference.segments[0].end_recording_time = 9.9;
+    candidate.segments[0].end_recording_time = 9.9;
+    let mut workspace = AnalysisWorkspace {
+        recordings: vec![reference, candidate],
+        reference: Some(reference_key.clone()),
+        ..Default::default()
+    };
+    let data = HashMap::from([
+        (reference_source, dataset(reference_source, [0.0, 0.0])),
+        (candidate_source, dataset(candidate_source, [2.0, -1.0])),
+    ]);
+    let selection = [reference_key, candidate_key];
+    let candidate = |prepared: &PreparedComparison| prepared.runs[1].clone();
+
+    let uncorrected = candidate(&prepare_comparison(&workspace, &selection, &data));
+    assert_eq!(uncorrected.gps_drift, None);
+
+    workspace.course.correct_gps_drift = true;
+    let prepared = prepare_comparison(&workspace, &selection, &data);
+    let corrected = candidate(&prepared);
+    let drift = corrected.gps_drift.unwrap();
+    assert_eq!(drift.method, GpsDriftMethod::Staging);
+    assert!((drift.east_meters - 2.0).abs() < 0.01 && (drift.north_meters + 1.0).abs() < 0.01);
+    let reference = &prepared.runs[0];
+    assert_eq!(reference.gps_drift, None);
+    assert!((corrected.gps[0].latitude - reference.gps[0].latitude).abs() < 1e-7);
+    assert!((corrected.gps[0].longitude - reference.gps[0].longitude).abs() < 1e-7);
 }
 
 #[test]
@@ -740,6 +827,7 @@ fn time_plot_interpolates_an_exact_gate_boundary_sample() {
         time_alignment: None,
         start_gate: None,
         finish_gate: None,
+        gps_drift: None,
     }];
     app.data
         .insert(source_id, SourceData::from_dataset(Arc::new(dataset)));
@@ -925,6 +1013,7 @@ fn stopped_reference_video_keeps_its_actual_elapsed_clock() {
         time_alignment: None,
         start_gate: None,
         finish_gate: None,
+        gps_drift: None,
     }];
     for mode in [XMode::Time, XMode::Distance, XMode::Course] {
         app.state.mode = mode;
