@@ -363,7 +363,7 @@ impl OverlayEditor {
         }
         let filter = match adapter {
             "insta360" => ("Camera telemetry", vec!["lrv", "insv"]),
-            "aim_xrk" => ("AiM MyChron recording", vec!["xrk"]),
+            "aim_xrk" => ("AiM MyChron recording", vec!["xrk", "xrz", "hrz"]),
             _ => ("CSV telemetry", vec!["csv", "txt"]),
         };
         let Some(path) = rfd::FileDialog::new()

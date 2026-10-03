@@ -43,7 +43,8 @@ mod views;
 #[path = "analysis_workflow.rs"]
 mod workflow;
 pub enum AnalysisAction {
-    OpenOverlay(ProjectV1),
+    OpenOverlay(Box<ProjectV1>),
+    OpenMyChron,
 }
 pub struct AnalysisApp {
     pub workspace: AnalysisWorkspace,
@@ -736,7 +737,7 @@ fn adapter_for(path: &Path) -> &'static str {
         .to_ascii_lowercase()
         .as_str()
     {
-        "xrk" => "aim_xrk",
+        "xrk" | "xrz" | "hrz" => "aim_xrk",
         "insv" | "lrv" => "insta360",
         _ => "generic_csv",
     }

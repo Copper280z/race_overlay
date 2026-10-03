@@ -42,7 +42,7 @@ default, the color **Theme**, keyboard shortcuts, and About. On macOS the header
 is also the window's title bar; Windows and Linux keep their native title bar.
 macOS also gets the system menu bar at the top of the screen (**File**, **View**,
 **Panels**, **Window**, **Help**) with the same commands and shortcuts:
-⌘O add files, ⇧⌘O open workspace, ⌥⌘O open video, ⌘S / ⇧⌘S save, ⌘1 / ⌘2 switch
+⌘O add files, ⇧⌘M import from MyChron, ⇧⌘O open workspace, ⌥⌘O open video, ⌘S / ⇧⌘S save, ⌘1 / ⌘2 switch
 workspace, plus theme and unit choices under **View**. Windows and Linux use the
 in-window header for these commands. One status bar at
 the bottom reports messages, background work, export progress, and any issues
@@ -318,11 +318,21 @@ order and can be renamed, switched off, reordered, re-linked, or removed. A
 source whose coverage cannot be read (an unusual projection) is tried for every
 course. An image covers the course at up to 4096 pixels across.
 
-Race Overlay first looks in its per-user imagery cache and reuses any saved
-image from the chosen source that covers the course, so the same venue is
-downloaded only once, even across workspaces. Only a miss contacts the network.
-The image (with its geographic bounds and attribution) is also copied beside the
-workspace, in an adjacent `.assets` folder once saved, so saved workspaces do
+Race Overlay first looks in its per-user imagery cache, so the same venue is
+downloaded only once, even across workspaces, and works offline. A cached image
+fits when every recorded GPS position of the course lies inside it and it is
+not so much larger than the course that detail would suffer. A fitting image
+from the top source is used without contacting the network at all. Failing
+that, one from a lower source is shown at once while the top source is asked
+for its image; it replaces the cached one when it arrives, and if it cannot be
+reached the cached image stays and a note over the map says so for a few
+seconds. Only when nothing is cached does the button depend on the network.
+**Cached…** lists every cached image showing any part of the course, from any
+source (including sources since removed) and imported images you have
+registered, so you can switch between them; images covering only part of the
+course are marked partial. The choice is saved with the workspace like any
+other map setting. The image (with its geographic bounds and attribution) is
+also copied beside the workspace, in an adjacent `.assets` folder once saved, so saved workspaces do
 not depend on the cache. **Re-download** ignores the cache and fetches a fresh
 copy. The cache lives in the application-data folder
 (`~/Library/Application Support/Race Overlay/Imagery Cache` on macOS,
@@ -330,7 +340,9 @@ copy. The cache lives in the application-data folder
 `$XDG_DATA_HOME/race-overlay/Imagery Cache` or `~/.local/share/race-overlay/Imagery Cache`
 on Linux); delete it at any time to reclaim space. Existing map images can be
 imported as PNG/JPEG and registered using geographic bounds or three
-non-collinear image/GPS control points. Bounds use a north-up Web Mercator image;
+non-collinear image/GPS control points; once registered, an imported image is
+kept in the cache with its registration and offered under **Cached…** for any
+workspace at that venue. Bounds use a north-up Web Mercator image;
 control points support rotated images. Geographic registration is independent of
 the simplified course map. Downloads are limited to course-sized areas (30 km
 across), not whole regions. A GPS imagery map overlays all selected runs by
@@ -356,7 +368,7 @@ Select **Overlay** in the mode bar for the original editor, or choose
 2. Add one or more telemetry sources. For an Insta360 recording, select the
    matching LRV when available; it is much smaller than the INSV and contains
    the same sensor trailer. For an AiM logger, choose **Add ▸ MyChron XRK** in the Data sources panel and select
-   the original uncompressed `.xrk` file.
+   an `.xrk` file, or an `.xrz`/`.hrz` recording downloaded from the logger.
    Select a source and use **Remove source…** at the bottom of its settings to remove it. Removal clears that
    source's plot selections and widget bindings, but leaves the video, widgets,
    and other telemetry sources intact.
@@ -506,6 +518,89 @@ The XRK importer validates message framing and retains diagnostic counts for
 packets emitted by the logger without a matching channel definition. These
 hidden/internal packets are not presented as named telemetry because the file
 supplies neither their labels nor calibration.
+
+## MyChron over Wi-Fi
+
+Race Overlay downloads recordings straight from an AiM MyChron6 over the
+logger's own Wi-Fi hotspot (`AiM-MYC6-<serial>`, an open network). Turn the
+logger's Wi-Fi on, then choose **MyChron…** in the Analysis toolbar, **From
+MyChron…** on the welcome screen, or **File ▸ Import from MyChron…** (⇧⌘M) on
+macOS. A logger is remembered the first time it connects; rename it in **Track
+mode ▸ Logger**.
+
+**Sessions** lists every recording on the logger, newest first, grouped by day
+and track, with lap count, best lap, length, and size. **New** shows recordings
+not downloaded yet, **Downloaded** those already in the library (marked
+**Imported** when they are a source in the open workspace). Click rows to select
+them, or **Select new**, then **Download & import** (adds them to Analysis and
+switches to it) or **Download only**. **Cancel** stops after the chunk in
+flight; nothing partial is kept. While the window is open and connected, the
+app keeps the logger from switching itself off and re-reads the list every 30
+seconds, so new sessions appear. With the window closed (Track mode included)
+the logger's own auto-off applies, so a parked logger still saves its
+battery.
+
+Downloads go to a library folder, by default `Documents/Race Overlay/MyChron`,
+with one folder per logger and one per day:
+`MyChron 4127a9c0/2026-09-27/2026-09-27 1541 KELLYS a_0094.xrz`. Each logger
+folder holds `mychron-ledger.json`, the record of what was downloaded; it is
+what keeps Track mode from fetching a recording twice, and it travels with the
+folder. Files keep the logger's compressed `.xrz` form, which the XRK importer
+reads directly. A download is checked (exact size, and that it decompresses to
+an XRK) before it appears under its final name.
+
+### Track mode
+
+Track mode is for leaving the computer in the pits: when the logger comes into
+range, Race Overlay lists its recordings and downloads every one it has not
+downloaded before, then checks again while the logger stays in range. Turn it
+on in **Track mode**; it keeps running with the window closed, in Analysis or
+Overlay, and the status bar shows its state (click it to open the window).
+
+- **Logger**: watch any MyChron, or only one of the remembered loggers.
+- **Connection**: **I join its Wi-Fi** (default) only watches for the logger on
+  the network this computer is on, so join the hotspot yourself; once joined,
+  the operating system usually rejoins it whenever it is in range. **Switch
+  Wi-Fi for me** scans for the hotspot, joins it for each check, and returns to
+  the previous network afterwards, so the internet connection pauses while a
+  sync runs. On macOS this needs Location access, because macOS shows Wi-Fi
+  network names only to apps that have it (click **Allow…**; change it later in
+  System Settings ▸ Privacy & Security ▸ Location Services). On Linux it uses
+  NetworkManager (`nmcli`) and can use a chosen interface, so a second Wi-Fi
+  adapter can stay on the logger while the first keeps the paddock network.
+  Windows supports **I join its Wi-Fi** only.
+- **Sessions**: download recordings from **Any date**, **Today**, or the **Last
+  7 days**. **Wait in range** (default 30 s) must pass before the first check,
+  so a kart passing the pits does not start a download; **Re-check every**
+  (default 5 min) looks again while the logger stays.
+- **After download**: **Import to Analysis** adds new recordings to the open
+  workspace without changing modes; **Keep in library** only downloads them.
+  **Keep computer awake** (macOS) prevents idle sleep while Track mode is on.
+- **Activity** lists what Track mode did.
+
+Track mode never changes the logger. **More ▸ Set logger clock** is the one
+action that writes to it: it sets the logger's clock from this computer and
+shows the driver and vehicle names stored on the logger.
+
+To reach a logger through another machine (for example a Linux computer whose
+second adapter is on the hotspot, relaying TCP 2000 and UDP 36002), set
+`RACE_OVERLAY_MYCHRON_ADDR=host[:tcp_port[:udp_port]]` before starting Race
+Overlay. The protocol itself is described in `docs/mychron-protocol.md`; the
+`overlay-logger` crate's example is a command-line client for it:
+
+```sh
+cargo run -p overlay-logger --example mychron -- list
+cargo run -p overlay-logger --example mychron -- download a_0094.xrz
+```
+
+To try the MyChron window without a logger, serve a folder of `.xrk`/`.xrz`
+recordings from a pretend logger and point the app at the address it prints
+(press Enter in its terminal to take it in or out of range):
+
+```sh
+cargo run -p overlay-logger --features fake --example fake_logger -- mychron_data/gvkc
+RACE_OVERLAY_MYCHRON_ADDR=127.0.0.1:<tcp>:<udp> cargo run -p race-overlay
+```
 
 ## Project files
 

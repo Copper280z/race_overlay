@@ -1563,6 +1563,25 @@ fn supplied_autocross_runs_get_best_effort_time_alignment() {
 }
 
 #[test]
+fn logger_downloads_are_imported_once() {
+    let mut app = AnalysisApp::new();
+    let a = PathBuf::from("/library/MyChron 01234567/2026-08-30/a_0001.xrz");
+    let b = PathBuf::from("/library/MyChron 01234567/2026-08-30/a_0002.xrz");
+    assert_eq!(
+        app.import_logger_files(vec![a.clone(), b.clone(), a.clone()]),
+        2
+    );
+    assert_eq!(app.import_logger_files(vec![b.clone(), a.clone()]), 0);
+    assert_eq!(app.workspace.recordings.len(), 2);
+    let sources = app.source_paths();
+    assert!(sources.contains(&a) && sources.contains(&b));
+    assert_eq!(
+        app.workspace.recordings[0].sources[0].adapter, "aim_xrk",
+        "compressed recordings use the XRK adapter"
+    );
+}
+
+#[test]
 fn raw_attachment_keeps_primary_sources_and_deduplicates_camera() {
     let mut app = AnalysisApp::new();
     let primary = SourceId::new();

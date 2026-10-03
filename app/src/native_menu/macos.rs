@@ -117,6 +117,12 @@ impl NativeMenu {
                 accel(cmd, Code::KeyO),
             ),
             &b.item(
+                "file.mychron",
+                "Import from MyChron…",
+                MenuCommand::OpenMyChron,
+                accel(cmd_shift, Code::KeyM),
+            ),
+            &b.item(
                 "file.workspace",
                 "Open Workspace…",
                 MenuCommand::OpenWorkspace,

@@ -191,6 +191,29 @@ impl AnalysisApp {
         self.changed();
         id
     }
+    /// Paths of every telemetry source in the workspace.
+    pub fn source_paths(&self) -> std::collections::HashSet<PathBuf> {
+        self.workspace
+            .recordings
+            .iter()
+            .flat_map(|recording| &recording.sources)
+            .map(|source| source.path.clone())
+            .collect()
+    }
+    /// Adds recordings downloaded from a logger, skipping files that are
+    /// already sources. Returns how many were added.
+    pub fn import_logger_files(&mut self, paths: Vec<PathBuf>) -> usize {
+        let mut present = self.source_paths();
+        let new = paths
+            .into_iter()
+            .filter(|path| present.insert(path.clone()))
+            .collect::<Vec<_>>();
+        let count = new.len();
+        if count > 0 {
+            self.add_paths(new);
+        }
+        count
+    }
     pub(super) fn add_paths(&mut self, paths: Vec<PathBuf>) {
         let (videos, other): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| is_video(p));
         let mut added = vec![];
@@ -208,7 +231,7 @@ impl AnalysisApp {
                     .unwrap_or("")
                     .to_ascii_lowercase()
                     .as_str(),
-                "xrk" | "csv" | "insv" | "lrv"
+                "xrk" | "xrz" | "hrz" | "csv" | "insv" | "lrv"
             ) {
                 self.errors
                     .push(format!("Unsupported file: {}", path.display()));

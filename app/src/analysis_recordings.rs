@@ -539,7 +539,8 @@ impl AnalysisApp {
                 {
                     self.active_overlay = Some(id);
                     self.pause();
-                    self.actions.push(AnalysisAction::OpenOverlay(project));
+                    self.actions
+                        .push(AnalysisAction::OpenOverlay(Box::new(project)));
                 }
             }
             RecordingAction::RequestRemoval(id) => self.remove_recording = Some(id),

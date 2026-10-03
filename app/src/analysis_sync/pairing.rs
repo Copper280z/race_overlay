@@ -90,7 +90,7 @@ impl AnalysisApp {
     /// Asks for a data log and attaches it to the recording.
     pub(in crate::analysis_app) fn attach_data_log_dialog(&mut self, recording_id: RecordingId) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Telemetry", &["xrk", "csv", "insv", "lrv"])
+            .add_filter("Telemetry", &["xrk", "xrz", "hrz", "csv", "insv", "lrv"])
             .pick_file()
         {
             self.attach_source(recording_id, path);

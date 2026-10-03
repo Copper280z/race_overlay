@@ -6,13 +6,16 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_dock.workspace = true
 egui_plot.workspace = true
+flate2.workspace = true
 log.workspace = true
 overlay-core = { path = "../crates/overlay-core" }
+overlay-logger = { path = "../crates/overlay-logger" }
 overlay-media = { path = "../crates/overlay-media" }
 overlay-render = { path = "../crates/overlay-render" }
 rfd.workspace = true
@@ -27,6 +30,7 @@ ureq.workspace = true
 muda = { version = "0.21", default-features = false }
 
 [dev-dependencies]
+overlay-logger = { path = "../crates/overlay-logger", features = ["fake"] }
 tempfile.workspace = true
 # Renders the real UI offscreen for the opt-in visual snapshot tests.
 egui_kittest = { version = "0.36", features = ["wgpu", "eframe"] }

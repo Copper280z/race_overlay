@@ -2,6 +2,7 @@
 members = [
     "app",
     "crates/overlay-core",
+    "crates/overlay-logger",
     "crates/overlay-media",
     "crates/overlay-render",
 ]
@@ -14,12 +15,14 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 crossbeam-channel = "0.5"
 csv = "1.4"
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "persistence", "wgpu", "wayland", "x11"] }
 egui = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 egui_plot = "0.37"
+flate2 = "1.1"
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"

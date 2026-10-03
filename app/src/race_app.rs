@@ -50,6 +50,7 @@ pub struct RaceOverlayApp {
     /// Absent in headless tests, where there is no main-thread menu bar.
     menu: Option<crate::native_menu::NativeMenu>,
     settings: crate::settings_window::SettingsWindow,
+    mychron: crate::mychron::MyChron,
 }
 
 impl RaceOverlayApp {
@@ -78,6 +79,10 @@ impl RaceOverlayApp {
             window_title: String::new(),
             menu: native_menu.then(|| crate::native_menu::NativeMenu::install(&cc.egui_ctx)),
             settings: Default::default(),
+            mychron: crate::mychron::MyChron::new(crate::mychron::settings::load(
+                cc.storage
+                    .and_then(|storage| storage.get_string(crate::mychron::settings::STORAGE_KEY)),
+            )),
         }
     }
 
@@ -307,6 +312,14 @@ impl RaceOverlayApp {
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some((label, tone)) = self.mychron.status()
+                            && widgets::chip(ui, &label, tone)
+                                .interact(egui::Sense::click())
+                                .on_hover_text("Open MyChron")
+                                .clicked()
+                        {
+                            self.mychron.open_window();
+                        }
                         if let Some(error) = self.editor.tools_error() {
                             widgets::chip(ui, "FFmpeg unavailable", Tone::Warn)
                                 .on_hover_text(error);
@@ -388,6 +401,7 @@ impl RaceOverlayApp {
                 }
                 MenuCommand::SetUnits(units) => self.set_unit_system(units),
                 MenuCommand::OpenSettings => self.settings.open = true,
+                MenuCommand::OpenMyChron => self.mychron.open_window(),
                 MenuCommand::AddPanel(choice) => {
                     self.set_mode(true);
                     self.analysis.add_panel(choice);
@@ -470,6 +484,28 @@ impl RaceOverlayApp {
         }
     }
 
+    /// Adds what the MyChron window downloaded to Analysis. Downloads the
+    /// user asked for bring Analysis forward; Track mode's do not.
+    fn import_mychron_downloads(&mut self) {
+        let imports = self.mychron.take_imports();
+        if imports.is_empty() {
+            return;
+        }
+        let requested = imports.iter().any(|import| !import.automatic);
+        let count = self
+            .analysis
+            .import_logger_files(imports.into_iter().map(|import| import.path).collect());
+        if requested {
+            self.set_mode(true);
+        }
+        if count > 0 {
+            self.analysis.notify(format!(
+                "Imported {count} session{} from MyChron",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
     /// Overlay results (export finished, load errors) must stay visible even
     /// when Analysis is the mode being shown.
     fn surface_editor_status(&mut self) {
@@ -492,6 +528,10 @@ impl eframe::App for RaceOverlayApp {
             crate::imagery_sources::save(&self.analysis.imagery_sources),
         );
         storage.set_string(
+            crate::mychron::settings::STORAGE_KEY,
+            crate::mychron::settings::save(&self.mychron.settings),
+        );
+        storage.set_string(
             UNIT_SYSTEM_STORAGE_KEY,
             match self.unit_system() {
                 UnitSystem::Metric => "metric",
@@ -501,9 +541,15 @@ impl eframe::App for RaceOverlayApp {
         );
     }
 
+    fn on_exit(&mut self) {
+        self.mychron.shutdown();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.editor.poll_workers(&ctx);
+        self.mychron.poll(&ctx);
+        self.import_mychron_downloads();
         self.handle_shortcuts(&ctx);
         self.handle_menu(&ctx);
         self.surface_editor_status();
@@ -511,13 +557,19 @@ impl eframe::App for RaceOverlayApp {
         self.header(ui);
         self.status_bar(ui);
         self.settings.show(&ctx, &mut self.analysis.imagery_sources);
+        if self.mychron.is_open() {
+            let sources = self.analysis.source_paths();
+            self.mychron
+                .show(&ctx, &|path: &std::path::Path| sources.contains(path));
+        }
         if self.analysis_mode {
             self.analysis
                 .ui(ui, self.editor.tools(), self.unit_system());
             for action in self.analysis.take_actions() {
                 match action {
+                    crate::analysis_app::AnalysisAction::OpenMyChron => self.mychron.open_window(),
                     crate::analysis_app::AnalysisAction::OpenOverlay(project) => {
-                        if self.editor.open_analysis_overlay(project) {
+                        if self.editor.open_analysis_overlay(*project) {
                             self.analysis_mode = false;
                         } else {
                             self.analysis

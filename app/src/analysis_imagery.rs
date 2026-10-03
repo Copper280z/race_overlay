@@ -1,7 +1,7 @@
 //! Optional, georeferenced track imagery. Fetching and decoding never run in
 //! the UI thread; the GPS trace and comparison do not depend on this service.
 use crate::imagery_sources::{self, ImagerySource};
-use crate::ui_kit::{Tone, widgets};
+use crate::ui_kit::{Tone, theme, widgets};
 use egui::{Color32, Pos2, TextureHandle};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,6 +15,8 @@ use std::{
 
 const RADIUS: f64 = 6_378_137.0;
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+const TOAST_SECONDS: f64 = 5.0;
+const TOAST_FADE_SECONDS: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GeoBounds {
@@ -175,6 +177,17 @@ impl Registration {
         Ok(result)
     }
 
+    /// Where a position falls in the image, as fractions from its top left.
+    fn fraction(self, latitude: f64, longitude: f64) -> [f64; 2] {
+        let [x, y] = mercator(latitude, longitude);
+        let (dx, dy) = (x - self.x[2], y - self.y[2]);
+        let determinant = self.x[0] * self.y[1] - self.x[1] * self.y[0];
+        [
+            (dx * self.y[1] - dy * self.x[1]) / determinant,
+            (self.x[0] * dy - self.y[0] * dx) / determinant,
+        ]
+    }
+
     fn geo(self, u: f64, v: f64) -> [f64; 2] {
         geographic(
             self.x[0] * u + self.x[1] * v + self.x[2],
@@ -183,15 +196,44 @@ impl Registration {
     }
 }
 
+/// Where an image belongs on the map and whom to credit for it.
+#[derive(Clone, Debug)]
+struct Placement {
+    bounds: GeoBounds,
+    controls: Option<[ControlPoint; 3]>,
+    source_url: Option<String>,
+    name: String,
+    attribution: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Origin {
+    Downloaded,
+    /// "Get aerial image" found it in the cache.
+    Cached,
+    /// The user chose it from the cache.
+    Picked,
+}
+
 struct LoadedImage {
     path: PathBuf,
     image: egui::ColorImage,
-    downloaded_bounds: Option<GeoBounds>,
-    source_url: Option<String>,
-    /// The source a download came from: its name and attribution.
-    source: Option<(String, String)>,
-    /// True when a locally cached image satisfied the request.
-    from_cache: bool,
+    /// Absent when reloading the workspace's own image.
+    placement: Option<(Placement, Origin)>,
+}
+
+/// What a background load reports; a worker may send several.
+enum Update {
+    Loaded(Box<LoadedImage>),
+    /// A passing remark: the image shown stands, but something failed.
+    Toast(String),
+    Failed(String),
+}
+
+impl From<Result<LoadedImage, String>> for Update {
+    fn from(result: Result<LoadedImage, String>) -> Self {
+        result.map_or_else(Self::Failed, |loaded| Self::Loaded(Box::new(loaded)))
+    }
 }
 
 #[derive(Default)]
@@ -199,50 +241,34 @@ pub struct ImageryController {
     texture: Option<TextureHandle>,
     loaded_path: Option<PathBuf>,
     requested_path: Option<PathBuf>,
-    pending: Option<Receiver<Result<LoadedImage, String>>>,
+    pending: Option<Receiver<Update>>,
     error: Option<String>,
     /// Non-error status, such as "used a cached image".
     notice: Option<String>,
     registration_error: Option<String>,
     editing_bounds: Option<GeoBounds>,
     editing_controls: Option<[ControlPoint; 3]>,
+    /// A brief message over the map and when it appeared, in egui time.
+    toast: Option<(String, f64)>,
+    /// Cached images of the course, read when the picker opens.
+    cache_listing: Option<Vec<CachedImage>>,
 }
 
 impl ImageryController {
     pub fn poll(&mut self, ctx: &egui::Context, config: &mut ImageryConfig) {
-        if let Some(result) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.pending = None;
-            match result {
-                Ok(loaded) => {
-                    if let Some(bounds) = loaded.downloaded_bounds {
-                        let (name, attribution) = loaded.source.clone().unwrap_or_default();
-                        config.image_path = Some(loaded.path.clone());
-                        config.bounds = Some(bounds);
-                        config.controls = None;
-                        config.attribution = if attribution.is_empty() {
-                            name.clone()
-                        } else {
-                            attribution
-                        };
-                        config.source_url = loaded.source_url;
-                        self.notice = Some(if loaded.from_cache {
-                            format!("Cached {name} image; nothing downloaded.")
-                        } else {
-                            format!("Downloaded from {name}.")
-                        });
-                    }
-                    if config.image_path.as_ref() == Some(&loaded.path) {
-                        self.texture = Some(ctx.load_texture(
-                            "analysis-track-imagery",
-                            loaded.image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                        self.loaded_path = Some(loaded.path.clone());
-                        self.requested_path = Some(loaded.path);
-                        self.error = None;
-                    }
-                }
-                Err(error) => self.error = Some(error),
+        let now = ctx.input(|i| i.time);
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, shown)| now - shown >= TOAST_SECONDS)
+        {
+            self.toast = None;
+        }
+        while let Some(rx) = &self.pending {
+            match rx.try_recv() {
+                Ok(update) => self.apply(ctx, config, update),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => self.pending = None,
             }
         }
         if self.pending.is_none() && self.requested_path != config.image_path {
@@ -250,22 +276,69 @@ impl ImageryController {
             self.texture = None;
             self.loaded_path = None;
             if let Some(path) = config.image_path.clone() {
-                let (tx, rx) = mpsc::channel();
-                let repaint = ctx.clone();
-                std::thread::spawn(move || {
-                    let result = load_image(&path).map(|image| LoadedImage {
+                self.spawn(ctx, move || {
+                    Update::from(load_image(&path).map(|image| LoadedImage {
                         path,
                         image,
-                        downloaded_bounds: None,
-                        source_url: None,
-                        source: None,
-                        from_cache: false,
-                    });
-                    let _ = tx.send(result);
-                    repaint.request_repaint();
+                        placement: None,
+                    }))
                 });
-                self.pending = Some(rx);
             }
+        }
+    }
+
+    /// Runs `work` off the UI thread, replacing any load in progress.
+    fn spawn(&mut self, ctx: &egui::Context, work: impl FnOnce() -> Update + Send + 'static) {
+        self.spawn_updates(ctx, move |send| send(work()));
+    }
+
+    fn spawn_updates(
+        &mut self,
+        ctx: &egui::Context,
+        work: impl FnOnce(&mut dyn FnMut(Update)) + Send + 'static,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            work(&mut |update| {
+                let _ = tx.send(update);
+                repaint.request_repaint();
+            })
+        });
+        self.pending = Some(rx);
+    }
+
+    fn apply(&mut self, ctx: &egui::Context, config: &mut ImageryConfig, update: Update) {
+        let loaded = match update {
+            Update::Loaded(loaded) => *loaded,
+            Update::Toast(text) => return self.toast = Some((text, ctx.input(|i| i.time))),
+            Update::Failed(error) => return self.error = Some(error),
+        };
+        if let Some((placement, origin)) = loaded.placement {
+            config.image_path = Some(loaded.path.clone());
+            config.bounds = Some(placement.bounds);
+            config.controls = placement.controls;
+            config.attribution = placement.attribution;
+            config.source_url = placement.source_url;
+            self.editing_bounds = None;
+            self.editing_controls = None;
+            self.cache_listing = None;
+            let name = placement.name;
+            self.notice = match origin {
+                Origin::Downloaded => Some(format!("Downloaded from {name}.")),
+                Origin::Cached => Some(format!("Cached {name} image; nothing downloaded.")),
+                Origin::Picked => None,
+            };
+        }
+        if config.image_path.as_ref() == Some(&loaded.path) {
+            self.texture = Some(ctx.load_texture(
+                "analysis-track-imagery",
+                loaded.image,
+                egui::TextureOptions::LINEAR,
+            ));
+            self.loaded_path = Some(loaded.path.clone());
+            self.requested_path = Some(loaded.path);
+            self.error = None;
         }
     }
 
@@ -281,18 +354,20 @@ impl ImageryController {
     ) {
         self.poll(ui.ctx(), config);
         ui.horizontal_wrapped(|ui| {
-            let source = course_bounds
+            let padded = course_bounds
                 .map(GeoBounds::padded)
-                .filter(|bounds| bounds.valid())
-                .and_then(|bounds| imagery_sources::choose(imagery.sources, bounds));
-            let hover = source.as_ref().map_or_else(
+                .filter(|bounds| bounds.valid());
+            let candidates = padded
+                .map(|bounds| imagery_sources::covering(imagery.sources, bounds))
+                .unwrap_or_default();
+            let hover = candidates.first().map_or_else(
                 || "No imagery source covers this course; add one in Settings".to_owned(),
                 |source| format!("From {}; cached for reuse", source.name),
             );
             let mut request = None;
             if ui
                 .add_enabled(
-                    source.is_some() && self.pending.is_none(),
+                    !candidates.is_empty() && self.pending.is_none(),
                     egui::Button::new("Get aerial image"),
                 )
                 .on_hover_text(&hover)
@@ -306,10 +381,7 @@ impl ImageryController {
                 .on_hover_text("Search ArcGIS Online for imagery of this course")
                 .clicked()
             {
-                match course_bounds
-                    .map(GeoBounds::padded)
-                    .filter(|bounds| bounds.valid())
-                {
+                match padded {
                     Some(bounds) => crate::settings_window::request_find(ui.ctx(), bounds),
                     None => crate::settings_window::request_open(ui.ctx()),
                 }
@@ -317,7 +389,7 @@ impl ImageryController {
             if config.source_url.is_some()
                 && ui
                     .add_enabled(
-                        source.is_some() && self.pending.is_none(),
+                        !candidates.is_empty() && self.pending.is_none(),
                         egui::Button::new("Re-download"),
                     )
                     .on_hover_text("Ignore the cache")
@@ -325,20 +397,35 @@ impl ImageryController {
             {
                 request = Some(true);
             }
-            if let (Some(refresh), Some(source)) = (request, source) {
-                let bounds = course_bounds.expect("enabled for bounds").padded();
+            if let (Some(refresh), Some(course)) = (request, course_bounds)
+                && !candidates.is_empty()
+            {
                 let dir = imagery.asset_dir.to_owned();
                 let cache = crate::app_paths::imagery_cache_dir();
-                let repaint = ui.ctx().clone();
-                let (tx, rx) = mpsc::channel();
-                std::thread::spawn(move || {
-                    let result = fetch_imagery(&source, bounds, &dir, &cache, refresh);
-                    let _ = tx.send(result);
-                    repaint.request_repaint();
+                self.spawn_updates(ui.ctx(), move |send| {
+                    get_imagery(&candidates, course, &dir, &cache, refresh, send)
                 });
                 self.error = None;
                 self.notice = None;
-                self.pending = Some(rx);
+            }
+            if let Some(course) = course_bounds.filter(|bounds| bounds.valid()) {
+                let picked = widgets::popover(ui, "Cached…", |ui| {
+                    self.cache_menu(ui, config, course, imagery.sources)
+                });
+                match picked {
+                    Some(Some(entry)) => {
+                        widgets::close_popover(ui);
+                        let dir = imagery.asset_dir.to_owned();
+                        let sources = imagery.sources.to_vec();
+                        self.spawn(ui.ctx(), move || {
+                            Update::from(open_cached(&entry, &sources, &dir, Origin::Picked))
+                        });
+                        self.error = None;
+                        self.notice = None;
+                    }
+                    Some(None) => {}
+                    None => self.cache_listing = None,
+                }
             }
             if ui
                 .add_enabled(
@@ -386,6 +473,80 @@ impl ImageryController {
         }
     }
 
+    /// Lists the cached images of `course`; returns the one clicked.
+    fn cache_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        config: &ImageryConfig,
+        course: GeoBounds,
+        sources: &[ImagerySource],
+    ) -> Option<CachedImage> {
+        let listing = self.cache_listing.get_or_insert_with(|| {
+            cached_for_course(
+                read_cache(&crate::app_paths::imagery_cache_dir()),
+                course,
+                sources,
+            )
+        });
+        if listing.is_empty() {
+            widgets::hint(ui, "No cached images of this course");
+            return None;
+        }
+        let current = config.image_path.as_deref().and_then(Path::file_name);
+        let mut picked = None;
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for entry in listing.iter() {
+                    let selected = current.is_some() && entry.image.file_name() == current;
+                    if ui
+                        .add(
+                            egui::Button::selectable(selected, entry.name(sources))
+                                .min_size(egui::vec2(ui.available_width(), 24.0)),
+                        )
+                        .clicked()
+                    {
+                        picked = Some(entry.clone());
+                    }
+                    widgets::hint(ui, entry.caption(course));
+                    ui.add_space(2.0);
+                }
+            });
+        picked
+    }
+
+    /// Draws the current toast centred at the top of `rect`, fading out over
+    /// its last second. Repaints only while one is showing.
+    pub fn paint_toast(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let Some((text, shown)) = &self.toast else {
+            return;
+        };
+        let ctx = painter.ctx();
+        let remaining = TOAST_SECONDS - (ctx.input(|i| i.time) - shown);
+        if remaining <= 0.0 {
+            return;
+        }
+        if remaining > TOAST_FADE_SECONDS {
+            ctx.request_repaint_after(Duration::from_secs_f64(remaining - TOAST_FADE_SECONDS));
+        } else {
+            ctx.request_repaint();
+        }
+        let opacity = (remaining / TOAST_FADE_SECONDS).min(1.0) as f32;
+        let galley = painter.layout_no_wrap(
+            text.clone(),
+            egui::FontId::proportional(12.0),
+            theme::text::strong().gamma_multiply(opacity),
+        );
+        let padding = egui::vec2(10.0, 5.0);
+        let size = galley.size() + 2.0 * padding;
+        let toast = egui::Rect::from_min_size(
+            egui::pos2(rect.center().x - size.x / 2.0, rect.top() + 10.0),
+            size,
+        );
+        painter.rect_filled(toast, 4.0, theme::surface::raised().gamma_multiply(opacity));
+        painter.galley(toast.min + padding, galley, theme::text::strong());
+    }
+
     pub fn is_loading(&self) -> bool {
         self.pending.is_some()
     }
@@ -403,6 +564,7 @@ impl ImageryController {
             "Optional background. GPS comparison works without imagery or a saved track.",
         );
         self.quick_actions(ui, config, course_bounds, imagery, true);
+        let mut registered = false;
         {
             if let Some(path) = &config.image_path {
                 ui.small(path.display().to_string());
@@ -420,7 +582,7 @@ impl ImageryController {
                         }
                     });
                     if ui.button("Apply bounds").clicked() {
-                        if bounds.valid() { config.bounds=Some(*bounds);config.controls=None;self.registration_error=None; }
+                        if bounds.valid() { config.bounds=Some(*bounds);config.controls=None;self.registration_error=None;registered=true; }
                         else { self.registration_error=Some("Bounds must be ordered, finite WGS84 coordinates".into()); }
                     }
                 });
@@ -461,7 +623,7 @@ impl ImageryController {
                     }
                     if ui.button("Apply control points").clicked() {
                         match Registration::from_controls(*points) {
-                            Ok(_) => {config.controls=Some(*points);self.registration_error=None;}
+                            Ok(_) => {config.controls=Some(*points);self.registration_error=None;registered=true;}
                             Err(error) => self.registration_error=Some(error),
                         }
                     }
@@ -476,6 +638,22 @@ impl ImageryController {
             if !config.attribution.is_empty() {
                 ui.small(&config.attribution);
             }
+        }
+        // Downloads are cached already; an import is kept once it is placed.
+        if registered
+            && config.source_url.is_none()
+            && let Some(image) = config.image_path.clone()
+            && let Some((bounds, controls)) = registered_extent(config)
+        {
+            let attribution = config.attribution.clone();
+            let cache = crate::app_paths::imagery_cache_dir();
+            self.cache_listing = None;
+            std::thread::spawn(move || {
+                if let Err(error) = remember_import(&image, bounds, controls, &attribution, &cache)
+                {
+                    log::warn!("Could not cache imported imagery: {error}");
+                }
+            });
         }
     }
 
@@ -546,7 +724,7 @@ fn decode_image(bytes: &[u8]) -> Result<egui::ColorImage, String> {
     ))
 }
 
-fn load_image(path: &Path) -> Result<egui::ColorImage, String> {
+fn read_image_bytes(path: &Path) -> Result<Vec<u8>, String> {
     let file =
         fs::File::open(path).map_err(|e| format!("Cannot open imagery {}: {e}", path.display()))?;
     let mut bytes = Vec::new();
@@ -556,7 +734,18 @@ fn load_image(path: &Path) -> Result<egui::ColorImage, String> {
     if bytes.len() as u64 > MAX_IMAGE_BYTES {
         return Err("Image exceeds the 64 MiB input limit".into());
     }
-    decode_image(&bytes)
+    Ok(bytes)
+}
+
+fn load_image(path: &Path) -> Result<egui::ColorImage, String> {
+    decode_image(&read_image_bytes(path)?)
+}
+
+fn image_extension(bytes: &[u8]) -> &'static str {
+    match image::guess_format(bytes) {
+        Ok(image::ImageFormat::Png) => "png",
+        _ => "jpg",
+    }
 }
 
 fn download_image(
@@ -582,13 +771,10 @@ fn download_image(
     let (bytes, actual, url) = (fetched.bytes, fetched.extent, fetched.request);
     let image = decode_image(&bytes)?;
     fs::create_dir_all(dir).map_err(|e| format!("Cannot create imagery folder: {e}"))?;
-    let extension = match image::guess_format(&bytes) {
-        Ok(image::ImageFormat::Png) => "png",
-        _ => "jpg",
-    };
     let path = dir.join(format!(
-        "{}.{extension}",
-        cache_key(&source.cache_tag(), bounds)
+        "{}.{}",
+        cache_key(&source.cache_tag(), bounds),
+        image_extension(&bytes)
     ));
     fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     let path = fs::canonicalize(path).map_err(|e| e.to_string())?;
@@ -604,13 +790,24 @@ fn download_image(
         serde_json::to_vec_pretty(&metadata).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    let attribution = if source.attribution.is_empty() {
+        source.name.clone()
+    } else {
+        source.attribution.clone()
+    };
     Ok(LoadedImage {
         path,
         image,
-        downloaded_bounds: Some(actual),
-        source_url: Some(url),
-        source: Some((source.name.clone(), source.attribution.clone())),
-        from_cache: false,
+        placement: Some((
+            Placement {
+                bounds: actual,
+                controls: None,
+                source_url: Some(url),
+                name: source.name.clone(),
+                attribution,
+            },
+            Origin::Downloaded,
+        )),
     })
 }
 
@@ -638,59 +835,218 @@ fn cache_key(tag: &str, bounds: GeoBounds) -> String {
     )
 }
 
+/// Cache-key prefix of images the user imported and registered.
+const IMPORT_TAG: &str = "import";
+
+/// An image in the cache, with what its metadata file records.
+#[derive(Clone, Debug)]
 struct CachedImage {
     image: PathBuf,
+    /// The cache-key prefix: a source's [`ImagerySource::cache_tag`] or
+    /// [`IMPORT_TAG`].
+    tag: String,
+    /// The area the image shows; for a rotated import, the area around it.
     bounds: GeoBounds,
+    controls: Option<[ControlPoint; 3]>,
+    name: Option<String>,
+    attribution: String,
     source_url: Option<String>,
+    saved: Option<std::time::SystemTime>,
+}
+
+impl CachedImage {
+    fn is_import(&self) -> bool {
+        self.tag == IMPORT_TAG
+    }
+
+    /// The source's current name when it is still configured (the user may
+    /// have renamed it), else the name recorded with the image.
+    fn name(&self, sources: &[ImagerySource]) -> String {
+        sources
+            .iter()
+            .cloned()
+            .chain(std::iter::once(ImagerySource::usgs()))
+            .find(|source| source.cache_tag() == self.tag)
+            .map(|source| source.name)
+            .or_else(|| self.name.clone())
+            .unwrap_or_else(|| self.tag.clone())
+    }
+
+    fn placement(&self, sources: &[ImagerySource]) -> Placement {
+        let name = self.name(sources);
+        let attribution = if self.attribution.is_empty() && !self.is_import() {
+            name.clone()
+        } else {
+            self.attribution.clone()
+        };
+        Placement {
+            bounds: self.bounds,
+            controls: self.controls,
+            source_url: self.source_url.clone(),
+            name,
+            attribution,
+        }
+    }
+
+    /// True when every point of a course with these bounds is in the image.
+    /// A north-up image need only contain the bounds. A rotated import must
+    /// contain their corners, which is slightly stricter than the course.
+    fn shows_all_of(&self, course: GeoBounds) -> bool {
+        let Some(registration) = self
+            .controls
+            .and_then(|controls| Registration::from_controls(controls).ok())
+        else {
+            return contains(self.bounds, course);
+        };
+        [
+            (course.north, course.west),
+            (course.north, course.east),
+            (course.south, course.west),
+            (course.south, course.east),
+        ]
+        .into_iter()
+        .all(|(latitude, longitude)| {
+            let [u, v] = registration.fraction(latitude, longitude);
+            (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)
+        })
+    }
+
+    fn caption(&self, course: GeoBounds) -> String {
+        let date = self.saved.map(|saved| {
+            chrono::DateTime::<chrono::Local>::from(saved)
+                .format("%b %-d, %Y")
+                .to_string()
+        });
+        let partial = (!self.shows_all_of(course)).then_some("partial");
+        [date.as_deref(), partial]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
 }
 
 fn area(bounds: GeoBounds) -> f64 {
     (bounds.east - bounds.west) * (bounds.north - bounds.south)
 }
 
-/// The smallest image cached from the source tagged `tag` that fully covers
-/// `wanted` without being so much larger that its resolution would be poor.
-fn find_cached(cache_dir: &Path, tag: &str, wanted: GeoBounds) -> Option<CachedImage> {
-    let prefix = format!("{tag}-");
-    fs::read_dir(cache_dir)
-        .ok()?
+fn contains(outer: GeoBounds, inner: GeoBounds) -> bool {
+    outer.west <= inner.west
+        && outer.east >= inner.east
+        && outer.south <= inner.south
+        && outer.north >= inner.north
+}
+
+fn overlaps(a: GeoBounds, b: GeoBounds) -> bool {
+    a.west < b.east && a.east > b.west && a.south < b.north && a.north > b.south
+}
+
+/// Every usable image in the cache: its metadata parses and its image file
+/// is present.
+fn read_cache(cache_dir: &Path) -> Vec<CachedImage> {
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return Vec::new();
+    };
+    entries
         .filter_map(Result::ok)
-        .filter(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            name.starts_with(&prefix) && name.ends_with(".image.json")
-        })
         .filter_map(|entry| {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let key = file_name.strip_suffix(".image.json")?;
+            let tag = key.split_once('-').map_or(key, |(tag, _)| tag).to_owned();
             let metadata: serde_json::Value =
                 serde_json::from_slice(&fs::read(entry.path()).ok()?).ok()?;
+            let text = |field: &str| {
+                metadata
+                    .get(field)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            };
             let bounds: GeoBounds = serde_json::from_value(metadata.get("bounds")?.clone()).ok()?;
+            let controls = metadata
+                .get("controls")
+                .and_then(|controls| serde_json::from_value(controls.clone()).ok());
             // Images cached before sources existed are PNGs named like their metadata.
-            let file = metadata
-                .get("image")
-                .and_then(|name| name.as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .replace(".image.json", ".png")
-                });
-            let png = entry.path().with_file_name(file);
-            let covers = bounds.valid()
-                && bounds.west <= wanted.west
-                && bounds.east >= wanted.east
-                && bounds.south <= wanted.south
-                && bounds.north >= wanted.north
-                && area(bounds) <= area(wanted) * 4.0;
-            (covers && png.is_file()).then(|| CachedImage {
-                image: png,
+            let image = entry
+                .path()
+                .with_file_name(text("image").unwrap_or_else(|| format!("{key}.png")));
+            let saved = fs::metadata(&image).ok()?.modified().ok();
+            (bounds.valid() && image.is_file()).then(|| CachedImage {
+                image,
+                tag,
                 bounds,
-                source_url: metadata
-                    .get("source_url")
-                    .and_then(|url| url.as_str())
-                    .map(str::to_owned),
+                controls,
+                name: text("source_name").filter(|name| !name.is_empty()),
+                attribution: text("attribution").unwrap_or_default(),
+                source_url: text("source_url"),
+                saved,
             })
         })
+        .collect()
+}
+
+/// The area requested for a course: its GPS bounds with a margin, rounded
+/// outward to a ~100 m grid so nearby courses share cache entries.
+fn request_area(course: GeoBounds) -> GeoBounds {
+    snapped(course.padded())
+}
+
+/// The smallest image cached from the source tagged `tag` that shows the
+/// whole course (the bounds of its GPS points), without being so much larger
+/// than what would be requested for it that its resolution would be poor.
+/// The course lies inside the margin around it, well clear of the edges of
+/// an image downloaded for it.
+fn find_cached<'a>(
+    entries: &'a [CachedImage],
+    tag: &str,
+    course: GeoBounds,
+) -> Option<&'a CachedImage> {
+    let largest = area(request_area(course)) * 4.0;
+    entries
+        .iter()
+        .filter(|entry| {
+            entry.tag == tag && contains(entry.bounds, course) && area(entry.bounds) <= largest
+        })
         .min_by(|a, b| area(a.bounds).total_cmp(&area(b.bounds)))
+}
+
+/// The most preferred of `candidates` with a cached image of `course`: its
+/// rank (0 is the top source) and the image.
+fn first_cached<'a>(
+    entries: &'a [CachedImage],
+    candidates: &[ImagerySource],
+    course: GeoBounds,
+) -> Option<(usize, &'a CachedImage)> {
+    candidates.iter().enumerate().find_map(|(rank, source)| {
+        find_cached(entries, &source.cache_tag(), course).map(|hit| (rank, hit))
+    })
+}
+
+/// Cached images showing any of `course`, for the user to choose from:
+/// those covering all of it first, then in source order (imports and
+/// sources no longer configured last), then the most detailed.
+fn cached_for_course(
+    entries: Vec<CachedImage>,
+    course: GeoBounds,
+    sources: &[ImagerySource],
+) -> Vec<CachedImage> {
+    let tags = imagery_sources::candidates(sources)
+        .map(|source| source.cache_tag())
+        .collect::<Vec<_>>();
+    let rank = |entry: &CachedImage| {
+        tags.iter()
+            .position(|tag| *tag == entry.tag)
+            .unwrap_or(usize::MAX)
+    };
+    let mut entries = entries
+        .into_iter()
+        .filter(|entry| overlaps(entry.bounds, course))
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        (!a.shows_all_of(course), rank(a))
+            .cmp(&(!b.shows_all_of(course), rank(b)))
+            .then(area(a.bounds).total_cmp(&area(b.bounds)))
+    });
+    entries
 }
 
 /// Copies a cached image (and its metadata) beside the workspace so saved
@@ -713,55 +1069,130 @@ fn install_asset(source: &Path, asset_dir: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(destination).map_err(|e| e.to_string())
 }
 
-/// Returns imagery for `bounds`: from the local cache when it has a suitable
-/// image (unless `refresh`), otherwise downloaded once and cached.
-fn fetch_imagery(
-    source: &ImagerySource,
-    bounds: GeoBounds,
+fn open_cached(
+    entry: &CachedImage,
+    sources: &[ImagerySource],
+    asset_dir: &Path,
+    origin: Origin,
+) -> Result<LoadedImage, String> {
+    let path = install_asset(&entry.image, asset_dir)?;
+    Ok(LoadedImage {
+        image: load_image(&path)?,
+        path,
+        placement: Some((entry.placement(sources), origin)),
+    })
+}
+
+/// Imagery for a course with GPS bounds `course`, sending what it finds as it
+/// goes. `candidates` are
+/// the sources covering the course, most preferred first. A cached image from
+/// the top source is used without contacting the network. One from a lower
+/// source is shown at once while the top source is asked for its image,
+/// which replaces it when it arrives. Only `refresh` skips the cache.
+fn get_imagery(
+    candidates: &[ImagerySource],
+    course: GeoBounds,
     asset_dir: &Path,
     cache_dir: &Path,
     refresh: bool,
-) -> Result<LoadedImage, String> {
-    let wanted = snapped(bounds);
-    if !refresh && let Some(hit) = find_cached(cache_dir, &source.cache_tag(), wanted) {
-        let path = install_asset(&hit.image, asset_dir)?;
-        let image = load_image(&path)?;
-        return Ok(LoadedImage {
-            path,
-            image,
-            downloaded_bounds: Some(hit.bounds),
-            source_url: hit.source_url,
-            source: Some((source.name.clone(), source.attribution.clone())),
-            from_cache: true,
-        });
+    send: &mut dyn FnMut(Update),
+) {
+    let Some(top) = candidates.first() else {
+        return send(Update::Failed(
+            "No imagery source covers this course".into(),
+        ));
+    };
+    let mut shown = None;
+    if !refresh {
+        let entries = read_cache(cache_dir);
+        if let Some((rank, hit)) = first_cached(&entries, candidates, course)
+            && let Ok(loaded) = open_cached(hit, candidates, asset_dir, Origin::Cached)
+        {
+            send(Update::from(Ok(loaded)));
+            if rank == 0 {
+                return;
+            }
+            shown = Some(hit.name(candidates));
+        }
     }
-    let mut loaded = download_image(source, wanted, cache_dir)?;
-    loaded.path = install_asset(&loaded.path, asset_dir)?;
-    Ok(loaded)
+    let downloaded = download_image(top, request_area(course), cache_dir).and_then(|mut loaded| {
+        loaded.path = install_asset(&loaded.path, asset_dir)?;
+        Ok(loaded)
+    });
+    send(match (downloaded, shown) {
+        (Ok(loaded), _) => Update::from(Ok(loaded)),
+        (Err(_), Some(name)) => Update::Toast(format!(
+            "{} unavailable; showing cached {name} image.",
+            top.name
+        )),
+        (Err(error), None) => Update::Failed(error),
+    });
+}
+
+/// The registered area of the configured image and its control points, if
+/// it is placed by them.
+fn registered_extent(config: &ImageryConfig) -> Option<(GeoBounds, Option<[ControlPoint; 3]>)> {
+    let Some(controls) = config.controls else {
+        return config
+            .bounds
+            .filter(|bounds| bounds.valid())
+            .map(|b| (b, None));
+    };
+    let registration = Registration::from_controls(controls).ok()?;
+    let corners =
+        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(u, v)| registration.geo(u, v));
+    let latitudes = corners.map(|[latitude, _]| latitude);
+    let longitudes = corners.map(|[_, longitude]| longitude);
+    let bounds = GeoBounds {
+        west: longitudes.into_iter().fold(f64::INFINITY, f64::min),
+        south: latitudes.into_iter().fold(f64::INFINITY, f64::min),
+        east: longitudes.into_iter().fold(f64::NEG_INFINITY, f64::max),
+        north: latitudes.into_iter().fold(f64::NEG_INFINITY, f64::max),
+    };
+    bounds.valid().then_some((bounds, Some(controls)))
+}
+
+/// Keeps a registered imported image in the cache, so any workspace covering
+/// the same place can choose it. The same file imported again replaces its
+/// entry, so the latest registration wins.
+fn remember_import(
+    image: &Path,
+    bounds: GeoBounds,
+    controls: Option<[ControlPoint; 3]>,
+    attribution: &str,
+    cache_dir: &Path,
+) -> Result<PathBuf, String> {
+    let bytes = read_image_bytes(image)?;
+    fs::create_dir_all(cache_dir).map_err(|e| format!("Cannot create imagery folder: {e}"))?;
+    let key = format!("{IMPORT_TAG}-{:016x}", imagery_sources::stable_hash(&bytes));
+    let path = cache_dir.join(format!("{key}.{}", image_extension(&bytes)));
+    if !path.is_file() {
+        fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    }
+    let file_name = image
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let metadata = serde_json::json!({
+        "bounds": bounds,
+        "controls": controls,
+        "attribution": attribution,
+        "source_name": format!("Imported {file_name}"),
+        "image": path.file_name().map(|name| name.to_string_lossy()),
+    });
+    fs::write(
+        path.with_extension("image.json"),
+        serde_json::to_vec_pretty(&metadata).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    #[ignore = "requires access to the public USGS imagery service"]
-    fn downloads_georeferenced_usgs_image() {
-        let directory = tempfile::tempdir().unwrap();
-        let result = download_image(
-            &ImagerySource::usgs(),
-            GeoBounds {
-                west: -77.707,
-                south: 42.891,
-                east: -77.704,
-                north: 42.894,
-            },
-            directory.path(),
-        )
-        .unwrap();
-        assert!(result.path.is_file());
-        assert!(result.downloaded_bounds.unwrap().valid());
-        assert!(!result.image.pixels.is_empty());
-    }
+    // All coordinates here are synthetic: no recorded positions belong in
+    // the repository.
     fn bounds(west: f64, south: f64, east: f64, north: f64) -> GeoBounds {
         GeoBounds {
             west,
@@ -771,8 +1202,44 @@ mod tests {
         }
     }
 
+    /// A made-up course a few hundred metres across.
+    fn course() -> GeoBounds {
+        bounds(-100.0046, 40.0013, -100.0021, 40.0037)
+    }
+
+    #[test]
+    #[ignore = "requires access to the public USGS imagery service"]
+    fn downloads_georeferenced_usgs_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = download_image(
+            &ImagerySource::usgs(),
+            request_area(course()),
+            directory.path(),
+        )
+        .unwrap();
+        assert!(result.path.is_file());
+        assert!(result.placement.unwrap().0.bounds.valid());
+        assert!(!result.image.pixels.is_empty());
+    }
+
+    #[test]
+    fn snapping_expands_outward_and_is_stable() {
+        let s = snapped(bounds(-100.0074, 40.0012, -100.0041, 40.0038));
+        assert!(s.west <= -100.0074 && s.east >= -100.0041);
+        assert!(s.south <= 40.0012 && s.north >= 40.0038);
+        assert_eq!(
+            cache_key("usgs", s),
+            cache_key(
+                "usgs",
+                snapped(bounds(-100.0079, 40.0011, -100.0042, 40.0039))
+            )
+        );
+    }
+
     fn cache_entry(dir: &Path, key: &str, actual: GeoBounds) {
-        fs::write(dir.join(format!("{key}.png")), b"png").unwrap();
+        image::RgbImage::new(4, 4)
+            .save(dir.join(format!("{key}.png")))
+            .unwrap();
         let metadata = serde_json::json!({"bounds": actual, "source_url": "https://example.test"});
         fs::write(
             dir.join(format!("{key}.image.json")),
@@ -782,54 +1249,273 @@ mod tests {
     }
 
     #[test]
-    fn snapping_expands_outward_and_is_stable() {
-        let s = snapped(bounds(-77.7074, 42.8912, -77.7041, 42.8938));
-        assert!(s.west <= -77.7074 && s.east >= -77.7041);
-        assert!(s.south <= 42.8912 && s.north >= 42.8938);
-        assert_eq!(snapped(s), s);
+    fn cache_reuses_an_image_showing_the_course_and_ignores_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let cached = bounds(-100.01, 40.00, -100.00, 40.01);
+        cache_entry(dir.path(), "usgs-a", cached);
+        let entries = read_cache(dir.path());
+        // Inside the cached area: hit.
+        let inside = bounds(-100.008, 40.002, -100.002, 40.008);
         assert_eq!(
-            cache_key("usgs", s),
-            cache_key(
-                "usgs",
-                snapped(bounds(-77.7079, 42.8911, -77.7042, 42.8939))
-            )
+            find_cached(&entries, "usgs", inside).unwrap().bounds,
+            cached
+        );
+        // Another source's cache does not satisfy this one.
+        assert!(find_cached(&entries, "src0123abcd", inside).is_none());
+        // Partly outside: miss.
+        let outside = bounds(-100.012, 40.002, -100.002, 40.008);
+        assert!(find_cached(&entries, "usgs", outside).is_none());
+        // A tiny course inside a huge cached image would be low resolution.
+        let tiny = bounds(-100.0052, 40.0050, -100.0048, 40.0054);
+        assert!(find_cached(&entries, "usgs", tiny).is_none());
+        // Missing image file: not listed.
+        fs::remove_file(dir.path().join("usgs-a.png")).unwrap();
+        assert!(read_cache(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn an_image_downloaded_for_a_course_is_found_for_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        // A service may return the requested area a hair smaller after the
+        // round trip through Web Mercator; the course is far inside it.
+        let shrink = 1e-9;
+        let request = request_area(course());
+        let returned = bounds(
+            request.west + shrink,
+            request.south + shrink,
+            request.east - shrink,
+            request.north - shrink,
+        );
+        cache_entry(dir.path(), &cache_key("usgs", request), returned);
+        let entries = read_cache(dir.path());
+        assert!(find_cached(&entries, "usgs", course()).is_some());
+        // Another recording of the same course, a little offset, too.
+        let offset = bounds(-100.0047, 40.0012, -100.0022, 40.0036);
+        assert!(find_cached(&entries, "usgs", offset).is_some());
+    }
+
+    fn source(name: &str) -> ImagerySource {
+        ImagerySource {
+            name: name.into(),
+            // Nothing listens here: a request fails at once, without leaving
+            // this machine.
+            url: format!("http://127.0.0.1:9/arcgis/rest/services/{name}/MapServer"),
+            ..ImagerySource::usgs()
+        }
+    }
+
+    fn cache_for(dir: &Path, source: &ImagerySource) {
+        let request = request_area(course());
+        cache_entry(dir, &cache_key(&source.cache_tag(), request), request);
+    }
+
+    fn run(candidates: &[ImagerySource], cache: &Path, assets: &Path) -> Vec<Update> {
+        let mut updates = Vec::new();
+        get_imagery(candidates, course(), assets, cache, false, &mut |update| {
+            updates.push(update)
+        });
+        updates
+    }
+
+    #[test]
+    fn the_top_source_cached_needs_no_request() {
+        let cache = tempfile::tempdir().unwrap();
+        let assets = tempfile::tempdir().unwrap();
+        let (state, county) = (source("State"), source("County"));
+        cache_for(cache.path(), &state);
+        cache_for(cache.path(), &county);
+
+        let updates = run(&[state, county], cache.path(), assets.path());
+        let [Update::Loaded(loaded)] = updates.as_slice() else {
+            panic!("expected only the cached image");
+        };
+        let (placement, origin) = loaded.placement.as_ref().unwrap();
+        assert_eq!(
+            (placement.name.as_str(), *origin),
+            ("State", Origin::Cached)
+        );
+        assert!(
+            loaded
+                .path
+                .starts_with(fs::canonicalize(assets.path()).unwrap())
         );
     }
 
     #[test]
-    fn cache_reuses_a_covering_image_and_ignores_others() {
-        let dir = tempfile::tempdir().unwrap();
-        let cached = bounds(-77.71, 42.89, -77.70, 42.90);
-        cache_entry(dir.path(), "usgs-a", cached);
-        // Inside the cached area: hit.
-        let inside = bounds(-77.709, 42.8905, -77.701, 42.8995);
-        assert_eq!(
-            find_cached(dir.path(), "usgs", inside).unwrap().bounds,
-            cached
+    fn a_lower_source_cached_is_shown_while_the_top_one_is_tried() {
+        let cache = tempfile::tempdir().unwrap();
+        let assets = tempfile::tempdir().unwrap();
+        let (state, county) = (source("State"), source("County"));
+        cache_for(cache.path(), &county);
+
+        let updates = run(&[state.clone(), county], cache.path(), assets.path());
+        let [Update::Loaded(loaded), Update::Toast(toast)] = updates.as_slice() else {
+            panic!("expected the cached image, then a toast");
+        };
+        assert_eq!(loaded.placement.as_ref().unwrap().0.name, "County");
+        assert!(toast.starts_with("State unavailable"), "{toast}");
+
+        // Nothing cached at all: the failure is an error.
+        let empty = tempfile::tempdir().unwrap();
+        let updates = run(&[state], empty.path(), assets.path());
+        assert!(matches!(updates.as_slice(), [Update::Failed(_)]));
+    }
+
+    #[test]
+    fn the_toast_lasts_five_seconds() {
+        let ctx = egui::Context::default();
+        let mut controller = ImageryController::default();
+        let mut config = ImageryConfig::default();
+        controller.apply(&ctx, &mut config, Update::Toast("Gone".into()));
+        assert!(controller.toast.is_some());
+        let at = |seconds: f64| egui::RawInput {
+            time: Some(seconds),
+            ..Default::default()
+        };
+        let frame = |controller: &mut ImageryController, seconds: f64| {
+            let mut config = ImageryConfig::default();
+            ctx.run_ui(at(seconds), |ui| controller.poll(ui.ctx(), &mut config))
+                .textures_delta
+                .clear()
+        };
+        frame(&mut controller, 4.9);
+        assert!(controller.toast.is_some());
+        frame(&mut controller, 5.1);
+        assert!(controller.toast.is_none());
+    }
+
+    #[test]
+    fn a_picked_image_is_kept_in_the_workspace_settings() {
+        let cache = tempfile::tempdir().unwrap();
+        let assets = tempfile::tempdir().unwrap();
+        let county = source("County");
+        cache_for(cache.path(), &county);
+        let entries = read_cache(cache.path());
+        let picked = open_cached(&entries[0], &[county], assets.path(), Origin::Picked).unwrap();
+
+        let mut controller = ImageryController::default();
+        let mut config = ImageryConfig::default();
+        controller.apply(
+            &egui::Context::default(),
+            &mut config,
+            Update::from(Ok(picked)),
         );
-        // Another source's cache does not satisfy this one.
-        assert!(find_cached(dir.path(), "src0123abcd", inside).is_none());
-        // Partly outside: miss.
-        assert!(find_cached(dir.path(), "usgs", bounds(-77.72, 42.891, -77.704, 42.895)).is_none());
-        // A tiny course inside a huge cached image would be low resolution.
+        let saved: ImageryConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
         assert!(
-            find_cached(
-                dir.path(),
-                "usgs",
-                bounds(-77.7050, 42.8950, -77.7040, 42.8960)
-            )
-            .is_none()
+            saved
+                .image_path
+                .unwrap()
+                .starts_with(fs::canonicalize(assets.path()).unwrap())
         );
-        // Missing image file: miss.
-        fs::remove_file(dir.path().join("usgs-a.png")).unwrap();
-        assert!(find_cached(dir.path(), "usgs", inside).is_none());
+        assert_eq!(saved.bounds, Some(request_area(course())));
+        assert_eq!(saved.attribution, "County");
+        assert_eq!(saved.source_url.as_deref(), Some("https://example.test"));
+    }
+
+    #[test]
+    fn the_picker_lists_every_cached_image_of_the_course_best_first() {
+        let cache = tempfile::tempdir().unwrap();
+        let (state, county) = (source("State"), source("County"));
+        let course = bounds(-100.0065, 40.0015, -100.0045, 40.0035);
+        let covering = bounds(-100.007, 40.001, -100.004, 40.004);
+        let wider = bounds(-100.008, 40.000, -100.003, 40.005);
+        let partial = bounds(-100.006, 40.001, -100.004, 40.004);
+        cache_entry(
+            cache.path(),
+            &cache_key(&county.cache_tag(), covering),
+            covering,
+        );
+        cache_entry(cache.path(), &cache_key(&state.cache_tag(), wider), wider);
+        cache_entry(
+            cache.path(),
+            &cache_key(&state.cache_tag(), partial),
+            partial,
+        );
+        cache_entry(cache.path(), "src00000000-gone", covering);
+        let elsewhere = bounds(-90.0, 35.0, -89.9, 35.1);
+        cache_entry(cache.path(), &cache_key("usgs", elsewhere), elsewhere);
+
+        let sources = [state, county];
+        let listed = cached_for_course(read_cache(cache.path()), course, &sources);
+        let names = listed
+            .iter()
+            .map(|entry| (entry.name(&sources), entry.shows_all_of(course)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                ("State".to_owned(), true),
+                ("County".to_owned(), true),
+                ("src00000000".to_owned(), true),
+                ("State".to_owned(), false),
+            ]
+        );
+        assert!(listed[3].caption(course).ends_with("partial"));
+    }
+
+    #[test]
+    fn a_registered_import_is_cached_for_the_picker() {
+        let cache = tempfile::tempdir().unwrap();
+        let originals = tempfile::tempdir().unwrap();
+        let photo = originals.path().join("track.png");
+        image::RgbImage::new(8, 8).save(&photo).unwrap();
+        let points = [
+            ControlPoint {
+                u: 0.0,
+                v: 0.0,
+                latitude: 40.004,
+                longitude: -100.007,
+            },
+            ControlPoint {
+                u: 1.0,
+                v: 0.0,
+                latitude: 40.004,
+                longitude: -100.004,
+            },
+            ControlPoint {
+                u: 0.0,
+                v: 1.0,
+                latitude: 40.001,
+                longitude: -100.007,
+            },
+        ];
+        let config = ImageryConfig {
+            image_path: Some(photo.clone()),
+            controls: Some(points),
+            ..Default::default()
+        };
+        let (extent, controls) = registered_extent(&config).unwrap();
+        let course = bounds(-100.0065, 40.0015, -100.0045, 40.0035);
+        assert!(contains(extent, course));
+        remember_import(&photo, extent, controls, "", cache.path()).unwrap();
+        // Registering the same image again updates its one entry.
+        remember_import(&photo, extent, controls, "Survey", cache.path()).unwrap();
+
+        let entries = read_cache(cache.path());
+        let [entry] = entries.as_slice() else {
+            panic!("expected one cached import");
+        };
+        assert!(entry.is_import());
+        assert!(entry.shows_all_of(course));
+        assert!(!entry.shows_all_of(bounds(-100.0075, 40.0015, -100.0045, 40.0035)));
+        assert_eq!(entry.name(&[]), "Imported track.png");
+        let placement = entry.placement(&[]);
+        assert_eq!(placement.attribution, "Survey");
+        assert!(placement.controls.is_some() && placement.source_url.is_none());
+        // An import is offered, never chosen by "Get aerial image".
+        assert!(first_cached(&entries, &[ImagerySource::usgs()], course).is_none());
     }
 
     #[test]
     fn cached_image_is_copied_beside_the_workspace() {
         let cache = tempfile::tempdir().unwrap();
         let assets = tempfile::tempdir().unwrap();
-        cache_entry(cache.path(), "usgs-a", bounds(-77.71, 42.89, -77.70, 42.90));
+        cache_entry(
+            cache.path(),
+            "usgs-a",
+            bounds(-100.01, 40.00, -100.00, 40.01),
+        );
         let installed = install_asset(&cache.path().join("usgs-a.png"), assets.path()).unwrap();
         assert!(installed.starts_with(fs::canonicalize(assets.path()).unwrap()));
         assert!(installed.with_extension("image.json").is_file());
@@ -839,7 +1525,7 @@ mod tests {
 
     #[test]
     fn geographic_round_trip() {
-        for (lat, lon) in [(42.712, -76.88), (0.0, 0.0), (-33.8, 151.2)] {
+        for (lat, lon) in [(40.0, -100.0), (0.0, 0.0), (-30.0, 150.0)] {
             let [x, y] = mercator(lat, lon);
             let actual = geographic(x, y);
             assert!((actual[0] - lat).abs() < 1e-9);
@@ -890,6 +1576,9 @@ mod tests {
             assert!((lat - point.latitude).abs() < 1e-9);
             assert!((lon - point.longitude).abs() < 1e-9);
         }
+        let [lat, lon] = r.geo(0.3, 0.7);
+        let [u, v] = r.fraction(lat, lon);
+        assert!((u - 0.3).abs() < 1e-6 && (v - 0.7).abs() < 1e-6);
         assert!(Registration::from_controls([p[0], p[0], p[2]]).is_err());
         let same = ControlPoint {
             u: 1.0,

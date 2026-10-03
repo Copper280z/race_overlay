@@ -107,6 +107,9 @@ impl AnalysisApp {
         if ui.button("Add files…").clicked() {
             self.add_files_dialog();
         }
+        if ui.button("MyChron…").clicked() {
+            self.actions.push(AnalysisAction::OpenMyChron);
+        }
         widgets::action_menu(ui, "File ⏷", |ui| {
             if widgets::menu_item(ui, "Open workspace…", None) {
                 self.open_workspace_dialog();
@@ -131,7 +134,9 @@ impl AnalysisApp {
         if let Some(paths) = rfd::FileDialog::new()
             .add_filter(
                 "Data / video",
-                &["xrk", "csv", "insv", "lrv", "mp4", "mov", "mkv"],
+                &[
+                    "xrk", "xrz", "hrz", "csv", "insv", "lrv", "mp4", "mov", "mkv",
+                ],
             )
             .pick_files()
         {
@@ -302,6 +307,7 @@ impl AnalysisApp {
     pub(super) fn welcome(&mut self, ui: &mut egui::Ui) {
         let mut add_files = false;
         let mut open_workspace = false;
+        let mut from_mychron = false;
         widgets::empty_state(
             ui,
             "Compare laps and runs",
@@ -312,6 +318,9 @@ impl AnalysisApp {
                 }
                 if ui.button("Open workspace…").clicked() {
                     open_workspace = true;
+                }
+                if ui.button("From MyChron…").clicked() {
+                    from_mychron = true;
                 }
                 ui.add_space(14.0);
                 for step in [
@@ -327,7 +336,9 @@ impl AnalysisApp {
             && let Some(paths) = rfd::FileDialog::new()
                 .add_filter(
                     "Data / video",
-                    &["xrk", "csv", "insv", "lrv", "mp4", "mov", "mkv"],
+                    &[
+                        "xrk", "xrz", "hrz", "csv", "insv", "lrv", "mp4", "mov", "mkv",
+                    ],
                 )
                 .pick_files()
         {
@@ -335,6 +346,9 @@ impl AnalysisApp {
         }
         if open_workspace {
             self.open_workspace_dialog();
+        }
+        if from_mychron {
+            self.actions.push(AnalysisAction::OpenMyChron);
         }
     }
 }

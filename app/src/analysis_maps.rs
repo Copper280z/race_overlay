@@ -845,6 +845,9 @@ impl MapPanel {
                 Color32::from_gray(200),
             );
         }
+        if config.actual_gps {
+            self.imagery.paint_toast(ui.painter(), full);
+        }
         ui.allocate_rect(full, egui::Sense::hover());
         selection
     }

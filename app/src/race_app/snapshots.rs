@@ -144,6 +144,34 @@ fn render_ui_snapshots() {
     }
 }
 
+/// The MyChron window in its main states, with demo data (no logger needed).
+#[test]
+#[ignore = "writes PNGs; needs a GPU adapter"]
+fn render_mychron_window() {
+    use crate::mychron::window::Tab;
+    let Some(dir) = std::env::var_os("RACE_OVERLAY_SNAPSHOT_DIR").map(PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, connected, tab, downloading) in [
+        ("sessions", true, Tab::Sessions, false),
+        ("downloading", true, Tab::Sessions, true),
+        ("track-mode", true, Tab::TrackMode, false),
+        ("not-connected", false, Tab::Sessions, false),
+    ] {
+        let mut harness = Harness::builder()
+            .wgpu()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .with_pixels_per_point(1.0)
+            .build_eframe(|cc| RaceOverlayApp::build(&*cc, false));
+        harness
+            .state_mut()
+            .mychron
+            .demo_for_test(connected, tab, downloading);
+        shoot(&mut harness, &dir, &format!("16-mychron-{name}"));
+    }
+}
+
 /// Which decorative glyphs the bundled default fonts can actually draw.
 #[test]
 #[ignore = "writes a PNG; needs a GPU adapter"]

@@ -69,12 +69,8 @@ pub(crate) fn parse(data: &[u8]) -> Result<XrkRecording, String> {
     if data.len() < 20 {
         return Err("XRK file is too short".into());
     }
-    if data.starts_with(&[0x78, 0x01])
-        || data.starts_with(&[0x78, 0x5e])
-        || data.starts_with(&[0x78, 0x9c])
-        || data.starts_with(&[0x78, 0xda])
-    {
-        return Err("compressed XRZ input is not supported yet; select the original XRK".into());
+    if is_zlib(data) {
+        return parse(&inflate(data)?);
     }
 
     let headers = find_all_headers(data);
@@ -163,6 +159,32 @@ pub(crate) fn parse(data: &[u8]) -> Result<XrkRecording, String> {
         metadata,
         diagnostics,
     })
+}
+
+/// `.xrz`/`.hrz` recordings (and files downloaded from a logger over Wi-Fi)
+/// are an XRK deflated into a single zlib stream.
+fn is_zlib(data: &[u8]) -> bool {
+    data.len() >= 2 && data[0] == 0x78 && (u16::from(data[0]) << 8 | u16::from(data[1])) % 31 == 0
+}
+
+/// Inflated recordings are a few MB; the cap only rejects corrupt or hostile
+/// streams before they exhaust memory.
+const MAX_INFLATED_BYTES: u64 = 1 << 30;
+
+fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut out = Vec::with_capacity(data.len() * 3);
+    flate2::read::ZlibDecoder::new(data)
+        .take(MAX_INFLATED_BYTES + 1)
+        .read_to_end(&mut out)
+        .map_err(|error| format!("compressed recording is damaged: {error}"))?;
+    if out.len() as u64 > MAX_INFLATED_BYTES {
+        return Err("compressed recording inflates beyond 1 GiB".into());
+    }
+    if is_zlib(&out) {
+        return Err("compressed recording contains another compressed stream".into());
+    }
+    Ok(out)
 }
 
 fn find_all_headers(data: &[u8]) -> Vec<Header<'_>> {

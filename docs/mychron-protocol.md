@@ -41,7 +41,7 @@ For the whole capture the client sends the 6-byte ASCII payload `aim-ka` to
 a fixed-size **236-byte descriptor** (120 replies):
 
 ```
-ec000000                                          u32le length of what follows (0xec = 236-4)
+ec000000                                          u32le datagram length, including this word (0xec = 236)
 02000000 0b000001 00000600 ...                    counters/capability fields (mostly zeros)
 00000000...0c2e0200                               (offset 0x54) 'idn' record, see below
 ... 01000000 ...                                  tail, mostly zeros
@@ -73,7 +73,8 @@ Both directions use an ASCII-delimited frame with a payload checksum:
 * `sum16` = sum of all payload bytes mod 0x10000, little-endian.
   Example: hello payload `00000000 06080000` sums to 0x000e → trailer
   `<STCP 0e 00 3e>`. Verified on every message in both sessions.
-* Total frame overhead is 12 + 9 = 21 bytes.
+* Total frame overhead is 12 + 8 = 20 bytes (the trailer is `<`, `ST`, the
+  tag, the sum, `>`).
 
 Concrete first exchange of both sessions:
 
@@ -150,15 +151,21 @@ live re-verification (possibly "clock not yet synced").
 | other ids | 2 | 0x01, 0x05, 0x07, 0x0A, 0x25–0x29 → no response at all (client timeout); 0x24/4 and 0x03/6 likewise |
 | — (CP-4) | — | u32le file offset → download chunk; `00000000` → generic ack |
 
-## Device info blob (4 278 bytes)
+## Device info blob (4 279 bytes)
 
-Response to NC `0x10/1`. Uses an inner record framing:
+Response to NC `0x10/1`. Uses the same record framing as the channel blocks
+and `.xrk` files, with four-character tags that start with `i` and an `a`
+marker (corrected 2026-10-02 from a real blob; every checksum verified):
 
 ```
-'<' 'h' <TAG:3> <len:u32le> 'a' '>' <payload> '<' <TAG:3> <sum16:u16le> 'a' '>'
+'<' 'h' 'i' <TAG:3> <len:u32le> 'a' '>' <payload> '<' 'i' <TAG:3> <sum16:u16le> '>'
 ```
 
-Records present:
+Text records hold CRLF-separated `key=value|` lines (each value ends in `|`).
+`USR` wraps its lines in an ASCII header and trailer, `<hUSR 0000000092a>`
+and `<USR 008273>`.
+
+Records present (tags without the `i`):
 
 | TAG | len | Contents |
 | --- | --- | --- |
@@ -168,7 +175,7 @@ Records present:
 | `PTH` | 1187 | Device path map, CRLF lines `name=dir,index-suffix`, e.g. `media=0:,0:.N`, `settings=0:/set,0:/set.N`, `splash=0:/lgo,0:/lgo.N`, `channels=0:/ch,0:/ch.N`, `overlay=0:/ov,...`, `can1stream=0:/cn1,...`, `kline1stream=0:/kl1,...`, `rs232_1stream=0:/rs1,...`, `mathchannels=0:/mth,...`, `smarty=0:/smc,...`, `shiftlights=0:/shf,...`, `leds=0:/led,...`, `outputs=0:/out,...`, `messages=0:/msg,...`, `popups=0:/pop,...`, `dsplmeas=0:/dsm,...`, `tracks=0:/gps,...`, `tkk=0:/tkk,...`, `canoutput1=0:/cno1,...` |
 | `LCK` | 47 | Lock state (not decoded) |
 | `SST` | 219 | Not decoded |
-| `LTS` | 80 | Not decoded |
+| `LTS` | 80–81 | Not decoded |
 | `PRL` | 2212 | Not decoded |
 
 Device paths seen elsewhere: `0:/log/splash.bmp` and `0:/lgo/splash.bmp`
@@ -250,13 +257,14 @@ venue_type,mode,trk_type,motivolap,maxvel,device,track_lat,track_lon,
 test_dur,pname,ptype,ptime,pdist,pmaxv,valid,
 
 a_0089.xrz,477678,30/08/2026,15:33:28,2,,,,,,,,speed,closed,stop,
-1079717068,,427131792,-768804665,141383,,,,,,,
+1079717068,,420123456,-710654321,141383,,,,,,,
 ```
 
 Notes: sizes are bytes and match the download exactly; `track_lat/lon` are
-degrees × 1e7 (42.7131792, −76.8804665); `best` is milliseconds
+degrees × 1e7 (42.0123456, −71.0654321; coordinates in this document
+are replaced with made-up values); `best` is milliseconds
 (`a_0034.hrz,…,best=36605` = 36.605 s at track `KELLYS`); extensions are
-`.xrz` (current) and `.hrz` (older); `maxvel` holds a ~1.08e9 raw value on
+`.xrz` (current) and `.hrz` (older), both zlib-wrapped XRK; `maxvel` holds a ~1.08e9 raw value on
 every row — read as float32 bits the values are 3.13–3.44, and ×20 ≈
 63–69 mph, the right ballpark for these laps (a_0089's GPS top speed is
 67.6 mph) — plausible but unconfirmed. Related reads observed just before
@@ -300,11 +308,11 @@ Verified end-to-end by inflating the captured chunks and running
 `cargo run -p overlay-core --example xrk_inspect` on the result:
 
 * 32 channels, 2 laps (0.0–115.18 s out, 115.18–141.20 s in)
-* GPS 42.709–42.7135°N, −76.881°W, up to 30.2 m/s, RPM to 15 011
+* GPS spanning about 500 m, up to 30.2 m/s, RPM to 15 011
 * metadata `date=08/30/2026`, `time=15:33:28` — matches the CSV row exactly.
 
 Second file verified live (`a_0092.xrz`, 542 400 B → 1 084 248 B inflated):
-32 channels, 2 laps, GPS 42.7090–42.7134°N / −76.8810…−76.8766°W,
+32 channels, 2 laps, GPS spanning about 500 × 360 m,
 RPM ≤ 14 378.
 
 So Wi-Fi-downloaded `.xrz` = `zlib_deflate(XRK)`; the app's existing
@@ -386,6 +394,80 @@ client that speaks it.
 Protocol tools live untracked in `tools/mychron/`: a Wi-Fi STCP client
 (`aim_client.py`), the BLE heart-rate emulator (`hrm_peripheral.py`), and a
 GATT enumeration/probe script (`bt_gatt_probe.py`).
+
+## Implementation
+
+`crates/overlay-logger` implements everything above in Rust: framing and the
+transaction model, every typed operation in the table (time sync, device info,
+user profiles, datalog list, channel catalog/tree/schema, live start/stop,
+frames, heartbeat and snapshot, file stat and chunked reads), the UDP
+descriptor and keepalive, and Wi-Fi control for joining the hotspot. Parts this
+document leaves undecoded are returned as raw, checksum-annotated records. Its
+`mychron` example is a command-line client (`discover`, `probe`, `list`,
+`download`, `read`, `stat`, `info`, `set-clock`, `live`, `object`, `wifi …`)
+that supersedes `aim_client.py`; `--addr host[:tcp[:udp]]` or
+`RACE_OVERLAY_MYCHRON_ADDR` points it at a relay. The unit tests run against an
+in-process fake logger; `tests/device.rs` holds ignored tests for a real one:
+
+```sh
+cargo test -p overlay-logger --test device -- --ignored
+```
+
+### Rust client verification (2026-10-02)
+
+Run from a Linux host whose second adapter was associated with the logger's
+hotspot (`AiM-MYC6-011681`), with the `aim-ka` keepalive running throughout:
+
+* All five `tests/device.rs` tests pass: stable descriptor fingerprint, datalog
+  list after the **hello alone** (no time sync), catalog/tree/schema hashes
+  identical to the capture (97 channels), 10 polls of live streaming plus
+  stop, and a byte-exact download that inflates to XRK.
+* **Descriptor length fix:** the descriptor's leading word is the length of
+  the whole datagram (0xec = 236), not of what follows it; the transport
+  section above originally said "236−4".
+* 60 recordings listed; `stat`/`read` of `1:/mem/a_0089.xrz` (477 678 B),
+  `0:/tkk/dev.ria` (384 B), and absent `0:/lgo/splash.bmp` as documented;
+  NC `0x52/2` empty `0x0A11`; NC `0x05/2` silent.
+* `.hrz` recordings (e.g. `a_0034.hrz`, 715 309 B → 1 363 087 B) are the same
+  zlib-wrapped XRK as `.xrz` and import the same way. Throughput was about
+  160 KB/s (4.5 s for that file).
+* Live frames: over 10 s the tick at `[8:12]` advanced about 350 ms per poll.
+  In one run started right after an unanswered NC `0x05/2` probe, nine frames
+  over 3 s all repeated the same tick. Cause unknown.
+* Device info (after a clock write from a host on the same time zone): the
+  blob's framing differed from the description above, which has been
+  corrected; all eight records decode with valid checksums, and the path map
+  has 41 entries (including `recorded=1:/mem`, where recordings live).
+* The app's own service (browse, download, verify, library, import, and Track
+  mode limited to today) passed against the logger
+  (`real_logger_browse_download_and_track`, ignored by default).
+
+* **Auto-off timer** (set on the logger; 2 minutes minimum). Observations:
+  * With `aim-ka` keepalives every 1.1 s, all answered, the logger still
+    switched off.
+  * Run 1 (10 minutes): powered off about 10 minutes after a burst of
+    downloads, file reads, channel-block reads, and live streaming ending at
+    17:28, and about 14 minutes after power-on.
+  * Run 2 (10 minutes): powered off about 10 minutes after power-on and a
+    clock write, despite a second device-info read (with clock write) 2 minutes
+    later and datalog list requests 5 and 8 minutes later.
+  * Run 3 (2 minutes): powered off about 2 minutes after power-on despite NC
+    `0x53/2` heartbeats every 20 s.
+  * Run 4 (2 minutes): a short live stream every 20 s (schema, NC `0x28/6`,
+    about 1 s of NC `0x03/2` + `0x53/2` polls, NC `0x51/2` stop) kept it on
+    for 5 minutes.
+  * Run 5 (2 minutes): NC `0x03/2` alone every 20 s, on its own connection,
+    kept it on for a further 5 minutes.
+
+  So keepalives, the datalog list, time sync, and the live heartbeat do not
+  restart the timer; reading the live "main" object (NC `0x03/2`) does. The
+  app polls it every 30 s while its window shows a connected logger. Its
+  discovery probes alone do not keep a parked logger awake.
+
+Still open:
+
+* listing and downloading while the logger is recording;
+* joining and leaving the hotspot from macOS (CoreWLAN).
 
 ## Appendix: minimal frame parser (Python)
 

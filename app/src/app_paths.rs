@@ -17,6 +17,20 @@ pub(crate) fn imagery_cache_dir() -> PathBuf {
     application_data_dir().join("Imagery Cache")
 }
 
+/// Default home of recordings downloaded from MyChron loggers. They are the
+/// user's data, so they live under Documents rather than application support.
+pub(crate) fn mychron_library_dir() -> PathBuf {
+    let home = if cfg!(target_os = "windows") {
+        absolute_env_path("USERPROFILE")
+    } else {
+        absolute_env_path("HOME")
+    };
+    home.map(|home| home.join("Documents"))
+        .unwrap_or_else(application_data_dir)
+        .join("Race Overlay")
+        .join("MyChron")
+}
+
 #[cfg(target_os = "macos")]
 fn application_data_dir() -> PathBuf {
     absolute_env_path("HOME")

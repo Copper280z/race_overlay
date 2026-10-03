@@ -9,6 +9,7 @@ mod analysis_maps;
 mod app_paths;
 mod imagery_search;
 mod imagery_sources;
+mod mychron;
 mod native_menu;
 mod race_app;
 mod settings_window;

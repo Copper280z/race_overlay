@@ -23,6 +23,7 @@ pub use inert::NativeMenu;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MenuCommand {
     AddFiles,
+    OpenMyChron,
     OpenWorkspace,
     OpenVideo,
     OpenProject,

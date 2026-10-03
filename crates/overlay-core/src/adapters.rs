@@ -102,6 +102,10 @@ impl AdapterRegistry {
     }
 }
 
+/// File extensions [`AimXrkAdapter`] reads: plain XRK, and the zlib-compressed
+/// `.xrz` (current) and `.hrz` (older) forms a logger stores and serves over Wi-Fi.
+pub const AIM_LOGGER_EXTENSIONS: [&str; 3] = ["xrk", "xrz", "hrz"];
+
 /// AiM MyChron XRK recordings, decoded into the common telemetry model.
 pub struct AimXrkAdapter;
 impl TelemetrySourceAdapter for AimXrkAdapter {
@@ -120,9 +124,9 @@ impl TelemetrySourceAdapter for AimXrkAdapter {
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if extension != "xrk" {
+        if !AIM_LOGGER_EXTENSIONS.contains(&extension.as_str()) {
             return Err(AdapterError::Unsupported(
-                "AiM inputs must be original .xrk recordings".into(),
+                "AiM inputs must be .xrk, .xrz, or .hrz recordings".into(),
             ));
         }
         let recording = crate::xrk::parse(&fs::read(path)?)
@@ -896,6 +900,79 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// A minimal XRK: one RPM channel definition and three `(S` samples.
+    fn synthetic_xrk() -> Vec<u8> {
+        fn record(token: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut out = b"<h".to_vec();
+            out.extend_from_slice(token);
+            out.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+            out.extend_from_slice(b"\x00>");
+            out.extend_from_slice(payload);
+            out.push(b'<');
+            out.extend_from_slice(token);
+            let sum = payload.iter().map(|&b| u32::from(b)).sum::<u32>() as u16;
+            out.extend_from_slice(&sum.to_le_bytes());
+            out.push(b'>');
+            out
+        }
+        let mut definition = [0u8; 112];
+        definition[12] = 15; // rpm
+        definition[24..27].copy_from_slice(b"RPM");
+        definition[32..35].copy_from_slice(b"RPM");
+        definition[64..68].copy_from_slice(&100_000u32.to_le_bytes());
+        definition[72] = 4;
+        let mut data = record(b"CHS\0", &definition);
+        for (time, rpm) in [(0i32, 1_000i32), (100, 2_000), (200, 3_000)] {
+            data.extend_from_slice(b"(S");
+            data.extend_from_slice(&time.to_le_bytes());
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.extend_from_slice(&rpm.to_le_bytes());
+            data.push(b')');
+        }
+        data
+    }
+
+    #[test]
+    fn compressed_logger_recordings_load_like_plain_xrk() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = synthetic_xrk();
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let rpm = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            let dataset = AimXrkAdapter
+                .load(SourceId::new(), &path, &Value::Null)
+                .unwrap();
+            let samples = &dataset.named("rpm").expect("rpm channel").series.samples;
+            samples
+                .iter()
+                .map(|s| (s.time, s.value))
+                .collect::<Vec<_>>()
+        };
+        let expected = rpm("a_0001.xrk", &plain);
+        assert_eq!(
+            expected,
+            vec![(0.0, 1_000.0), (0.1, 2_000.0), (0.2, 3_000.0)]
+        );
+        assert_eq!(rpm("a_0001.xrz", &compressed), expected);
+        assert_eq!(rpm("A_0001.HRZ", &compressed), expected);
+        let unsupported = dir.path().join("a_0001.zip");
+        fs::write(&unsupported, &compressed).unwrap();
+        assert!(matches!(
+            AimXrkAdapter.load(SourceId::new(), &unsupported, &Value::Null),
+            Err(AdapterError::Unsupported(_))
+        ));
+        let truncated = dir.path().join("a_0002.xrz");
+        fs::write(&truncated, &compressed[..compressed.len() / 2]).unwrap();
+        assert!(matches!(
+            AimXrkAdapter.load(SourceId::new(), &truncated, &Value::Null),
+            Err(AdapterError::Invalid(_))
+        ));
+    }
 
     #[test]
     fn camera_workflow_uses_declared_adapter_capabilities() {

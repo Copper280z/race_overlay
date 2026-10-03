@@ -115,14 +115,7 @@ impl ImagerySource {
         if self.is_usgs() {
             return "usgs".into();
         }
-        // FNV-1a: stable across runs and platforms, unlike `DefaultHasher`.
-        let hash = self
-            .url
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-            });
-        format!("src{:08x}", hash as u32)
+        format!("src{:08x}", stable_hash(self.url.as_bytes()) as u32)
     }
 
     /// The request for a JPEG of `bounds` (Web Mercator metres), at most
@@ -174,9 +167,19 @@ pub fn candidates(sources: &[ImagerySource]) -> impl Iterator<Item = ImagerySour
         .chain(std::iter::once(ImagerySource::usgs()))
 }
 
-/// The first source that covers `bounds`.
-pub fn choose(sources: &[ImagerySource], bounds: GeoBounds) -> Option<ImagerySource> {
-    candidates(sources).find(|source| source.covers(bounds))
+/// The sources that cover `bounds`, in the order they are preferred.
+pub fn covering(sources: &[ImagerySource], bounds: GeoBounds) -> Vec<ImagerySource> {
+    candidates(sources)
+        .filter(|source| source.covers(bounds))
+        .collect()
+}
+
+/// FNV-1a: stable across runs and platforms, unlike `DefaultHasher`, so it
+/// can name files.
+pub fn stable_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 pub fn load(saved: Option<String>) -> Vec<ImagerySource> {
@@ -702,8 +705,8 @@ mod tests {
                 "maxImageWidth": 4096,
                 "maxImageHeight": 4096,
                 "fullExtent": {
-                    "xmin": -8883203.59, "ymin": 4937225.31,
-                    "xmax": -7997063.45, "ymax": 5627154.89,
+                    "xmin": -11577227.04, "ymin": 4579425.81,
+                    "xmax": -10686671.12, "ymax": 5621521.49,
                     "spatialReference": {"wkid": 102100, "latestWkid": 3857}
                 }
             }),
@@ -714,18 +717,18 @@ mod tests {
         assert_eq!(source.attribution, "NYS ITS Geospatial Services");
         assert_eq!(source.max_image_pixels, 4096);
         let coverage = source.coverage.unwrap();
-        assert!((coverage.west + 79.8).abs() < 0.1 && (coverage.north - 45.0).abs() < 0.1);
+        assert!((coverage.west + 104.0).abs() < 0.1 && (coverage.north - 45.0).abs() < 0.1);
         assert!(source.covers(GeoBounds {
-            west: -77.8,
-            south: 42.9,
-            east: -77.7,
-            north: 43.0
+            west: -100.1,
+            south: 40.0,
+            east: -100.0,
+            north: 40.1
         }));
         assert!(!source.covers(GeoBounds {
-            west: -90.0,
-            south: 42.9,
-            east: -89.9,
-            north: 43.0
+            west: -110.0,
+            south: 40.0,
+            east: -109.9,
+            north: 40.1
         }));
     }
 
@@ -754,18 +757,18 @@ mod tests {
         assert_eq!(state_plane.max_image_pixels, 2048);
     }
 
-    fn lorain_style_tile_layer() -> serde_json::Value {
+    fn county_style_tile_layer() -> serde_json::Value {
         json!({
             "mapName": "2025 Spring Aerials",
             "capabilities": "Map,TilesOnly",
             "copyrightText": "",
             "documentInfo": {
                 "Title": "R:\\GIS\\2025 Spring Aerials.aprx",
-                "author": "LorainCoGIS"
+                "author": "CountyGIS"
             },
             "fullExtent": {
-                "xmin": -9167173.07, "ymin": 5021569.78,
-                "xmax": -9113578.34, "ymax": 5090229.23,
+                "xmin": -11198740.77, "ymin": 5041886.53,
+                "xmax": -11087421.28, "ymax": 5116146.29,
                 "spatialReference": {"wkid": 102100, "latestWkid": 3857}
             },
             "tileInfo": {
@@ -786,16 +789,16 @@ mod tests {
     fn tile_only_layers_are_read_with_readable_names_and_credits() {
         let url = "https://tiles.example/arcgis/rest/services/2025_Spring_Aerial/MapServer";
         let source =
-            parse_service(url, ServiceKind::MapServer, &lorain_style_tile_layer()).unwrap();
+            parse_service(url, ServiceKind::MapServer, &county_style_tile_layer()).unwrap();
 
         assert_eq!(source.name, "2025 Spring Aerials");
-        assert_eq!(source.attribution, "LorainCoGIS");
+        assert_eq!(source.attribution, "CountyGIS");
         let tiles = source.tiles.unwrap();
         assert_eq!(tiles.size, 256);
         assert_eq!(tiles.levels.len(), 4);
 
         // A tile-only layer whose tiles this app cannot use is refused.
-        let mut state_plane = lorain_style_tile_layer();
+        let mut state_plane = county_style_tile_layer();
         state_plane["tileInfo"]["spatialReference"] = json!({"wkid": 2261});
         assert!(parse_service(url, ServiceKind::MapServer, &state_plane).is_err());
     }
@@ -803,15 +806,15 @@ mod tests {
     #[test]
     fn tiles_are_chosen_at_the_needed_detail() {
         let url = "https://tiles.example/arcgis/rest/services/A/MapServer";
-        let tiles = parse_service(url, ServiceKind::MapServer, &lorain_style_tile_layer())
+        let tiles = parse_service(url, ServiceKind::MapServer, &county_style_tile_layer())
             .unwrap()
             .tiles
             .unwrap();
         let course = web_mercator(GeoBounds {
-            west: -82.1395,
-            south: 41.4597,
-            east: -82.1305,
-            north: 41.4647,
+            west: -100.0045,
+            south: 41.4600,
+            east: -99.9955,
+            north: 41.4650,
         });
         // About 750 m (1000 Web Mercator metres at 41.5°N) across in 4096
         // px needs 0.24 map metres per pixel: level 19.
@@ -838,17 +841,26 @@ mod tests {
     #[test]
     fn user_sources_come_first_and_usgs_is_the_fallback() {
         let course = GeoBounds {
-            west: -76.9,
-            south: 42.7,
-            east: -76.8,
-            north: 42.8,
+            west: -100.1,
+            south: 40.0,
+            east: -100.0,
+            north: 40.1,
         };
         let mut state = ImagerySource::usgs();
         state.url = "https://state.example/arcgis/rest/services/Ortho/MapServer".into();
         state.name = "State".into();
-        assert_eq!(choose(&[state.clone()], course).unwrap().name, "State");
+        let names = |sources: &[ImagerySource]| {
+            covering(sources, course)
+                .into_iter()
+                .map(|source| source.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(std::slice::from_ref(&state)),
+            ["State", "USGS National Map"]
+        );
         state.enabled = false;
-        assert!(choose(&[state.clone()], course).unwrap().is_usgs());
+        assert_eq!(names(std::slice::from_ref(&state)), ["USGS National Map"]);
         state.enabled = true;
         state.coverage = Some(GeoBounds {
             west: -80.0,
@@ -856,14 +868,14 @@ mod tests {
             east: -79.0,
             north: 31.0,
         });
-        assert!(choose(&[state], course).unwrap().is_usgs());
+        assert_eq!(names(&[state]), ["USGS National Map"]);
         let europe = GeoBounds {
             west: 2.0,
             south: 48.0,
             east: 2.1,
             north: 48.1,
         };
-        assert_eq!(choose(&[], europe), None);
+        assert!(covering(&[], europe).is_empty());
     }
 
     #[test]

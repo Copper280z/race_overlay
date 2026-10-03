@@ -55,6 +55,11 @@ subject to the live-preview release gate described in `docs/raw-video.md`.
     `imagery_search.rs` finds and verifies services near a course in the
     ArcGIS Online catalog; `settings_window.rs` edits them. Sources are
     app-level preferences saved in eframe storage, not workspace data.
+  - `mychron/`: MyChron Wi-Fi downloads: the window (session browser and Track
+    mode), the background worker (`worker.rs`), pure decisions
+    (`policy.rs`), the download library and its ledger (`library.rs`), and
+    persisted settings. The service lives on the shell so Track mode keeps
+    running in both modes.
   - `ui_kit/`: the shared theme and small widgets (segmented control, cards,
     chips, popovers). Panels take colors from `theme::surface`, `theme::text`,
     `theme::accent()`, and `Tone`, never from literals. A color scheme is one
@@ -75,6 +80,10 @@ subject to the live-preview release gate described in `docs/raw-video.md`.
   `adapters.rs`/`xrk.rs` data ingestion.
 - `crates/overlay-render`: widget preparation and RGBA rendering; `video/` owns
   offscreen wgpu/CPU projection and stitching backends. No UI/media orchestration.
+- `crates/overlay-logger`: the MyChron6 Wi-Fi protocol client
+  (`docs/mychron-protocol.md`), UDP discovery, Wi-Fi control (`wifi/`: nmcli,
+  CoreWLAN, inert elsewhere), and a scriptable fake logger behind the `fake`
+  feature for tests. Depends on no other workspace crate.
 - `crates/overlay-media`: FFmpeg discovery, probing, preview, synchronization,
   audio, and final export. `processed/` pairs raw lens frames by integer PTS and
   accepts a caller-provided processor, without depending on the app or renderer.
@@ -83,7 +92,7 @@ subject to the live-preview release gate described in `docs/raw-video.md`.
 - `mychron_data`: optional local recordings for manual XRK validation; never a
   routine test dependency or committed fixture.
 
-Dependency direction is `app` → media/render/core and `overlay-render` →
+Dependency direction is `app` → media/render/core/logger and `overlay-render` →
 `overlay-core`; no library crate couples back to `app`. When a coordinator grows,
 extract a cohesive module with a narrow interface instead of creating a generic
 dumping-ground utility module.
@@ -92,6 +101,9 @@ dumping-ground utility module.
 
 - Prefer deterministic synthetic fixtures. Tests needing local recordings,
   network access, or FFmpeg should remain explicit and ignored by default.
+- Keep real GPS coordinates out of the repository. Tests, fixtures, examples,
+  and docs use made-up positions (for example near 40°N 100°W), never ones
+  taken from recordings, downloaded imagery, logger output, or real venues.
 - Add regression tests near the owning module. Test pure policy independently
   from UI rendering or external processes when possible.
 - Visual changes can be reviewed offscreen: the ignored `render_ui_snapshots`
@@ -108,6 +120,9 @@ dumping-ground utility module.
   frame); never from a constant loop.
 - Update `docs/usage.md` for visible behavior and `README.md` for setup or scope.
 - Do not commit `target/`, recordings, videos, exports, or local project files.
+- Work is not finished until `cargo build --release -p race-overlay`
+  succeeds: run it before reporting any change as done, not only before
+  publication.
 - Before publication, run:
 
   ```sh

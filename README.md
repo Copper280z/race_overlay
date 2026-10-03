@@ -6,7 +6,8 @@ dual-track INSV can be reframed directly in Analysis, Overlay, and export, with
 hard-cut/feather seams and optional camera-motion smoothing. It reads the IMU
 trailer in Insta360 INSV/LRV files,
 AiM MyChron XRK logs, generic timestamped CSV, or deterministic synthetic race
-data.
+data. Recordings can be downloaded from a MyChron6 over its Wi-Fi, by hand or
+automatically in Track mode whenever the logger comes into range.
 
 ## Install and run
 

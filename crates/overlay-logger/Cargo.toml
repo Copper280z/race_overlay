@@ -1,0 +1,27 @@
+[package]
+name = "overlay-logger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Scriptable in-process MyChron for tests in this and dependent crates.
+fake = []
+
+[dependencies]
+chrono.workspace = true
+csv.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSSet", "NSError", "NSEnumerator"] }
+objc2-core-wlan = { version = "0.3", default-features = false, features = ["std", "CWInterface", "CWNetwork", "CWWiFiClient"] }
+objc2-core-location = { version = "0.3", default-features = false, features = ["std", "CLLocationManager"] }
+
+[[example]]
+name = "fake_logger"
+required-features = ["fake"]

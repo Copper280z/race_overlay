@@ -404,9 +404,9 @@ mod tests {
     use serde_json::json;
 
     const COURSE: GeoBounds = GeoBounds {
-        west: -82.14,
+        west: -100.14,
         south: 41.46,
-        east: -82.13,
+        east: -100.13,
         north: 41.47,
     };
 
@@ -419,15 +419,15 @@ mod tests {
         let area = rounded_out(COURSE);
         assert_eq!(
             (area.west, area.south, area.east, area.north),
-            (-82.2, 41.4, -82.1, 41.5)
+            (-100.2, 41.4, -100.1, 41.5)
         );
     }
 
     #[test]
     fn candidates_skip_unusable_entries_and_put_local_ones_first() {
-        let state = [[-85.0, 38.0], [-80.0, 42.0]];
-        let county = [[-82.4, 41.1], [-81.9, 41.6]];
-        let elsewhere = [[-90.0, 30.0], [-89.0, 31.0]];
+        let state = [[-103.0, 38.0], [-98.0, 42.0]];
+        let county = [[-100.4, 41.1], [-99.9, 41.6]];
+        let elsewhere = [[-108.0, 30.0], [-107.0, 31.0]];
         let world = [[-180.0, -90.0], [180.0, 90.0]];
         let items = [
             item(
@@ -546,23 +546,23 @@ mod tests {
             source
         };
         let state = GeoBounds {
-            west: -85.0,
+            west: -103.0,
             south: 38.0,
-            east: -80.0,
+            east: -98.0,
             north: 42.0,
         };
         let county = GeoBounds {
-            west: -82.4,
+            west: -100.4,
             south: 41.1,
-            east: -81.9,
+            east: -99.9,
             north: 41.6,
         };
         // A state that flies one region a year: the old regional flight is
         // smaller than the statewide mosaic but no more local in kind.
         let region = GeoBounds {
-            west: -84.0,
+            west: -102.0,
             south: 39.5,
-            east: -81.0,
+            east: -99.0,
             north: 41.5,
         };
         let mut sources = vec![

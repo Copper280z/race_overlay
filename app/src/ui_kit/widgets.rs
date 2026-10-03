@@ -51,6 +51,38 @@ pub fn segmented<T: PartialEq + Copy>(
     changed
 }
 
+/// An on/off switch.
+pub fn toggle(ui: &mut Ui, on: &mut bool) -> egui::Response {
+    let size = egui::vec2(34.0, 18.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, "")
+    });
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool_responsive(response.id, *on);
+        let radius = rect.height() / 2.0;
+        let track = if *on {
+            theme::accent()
+        } else {
+            surface::control_border()
+        };
+        ui.painter().rect_filled(rect, radius, track);
+        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+        let knob = if *on {
+            theme::on_accent()
+        } else {
+            surface::raised()
+        };
+        ui.painter()
+            .circle_filled(egui::pos2(x, rect.center().y), radius - 3.0, knob);
+    }
+    response
+}
+
 /// Upper-case caption that introduces a group of controls.
 pub fn section_label(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
