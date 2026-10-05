@@ -20,6 +20,10 @@ mod inert;
 pub use inert::NativeMenu;
 
 /// Something the user chose from the menu bar.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "The inert native menu does not emit commands")
+)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MenuCommand {
     AddFiles,

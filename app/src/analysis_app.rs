@@ -19,7 +19,9 @@ use std::{
 mod chrome;
 #[path = "analysis_decimate.rs"]
 mod decimate;
-pub use chrome::{LAYOUT_PRESETS, PanelChoice};
+#[cfg(target_os = "macos")]
+pub use chrome::LAYOUT_PRESETS;
+pub use chrome::PanelChoice;
 #[path = "analysis_io.rs"]
 mod io;
 #[path = "analysis_model.rs"]
