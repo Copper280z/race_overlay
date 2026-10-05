@@ -2509,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "overlay-core"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "csv",
  "flate2",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "overlay-logger"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "chrono",
  "csv",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "overlay-media"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "crossbeam-channel",
  "rustfft",
@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "overlay-render"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "bytemuck",
  "image",
@@ -2895,7 +2895,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "race-overlay"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "anyhow",
  "chrono",
