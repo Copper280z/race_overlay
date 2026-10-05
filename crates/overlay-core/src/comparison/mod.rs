@@ -87,7 +87,7 @@ pub fn prepare_comparison(
     let course = workspace
         .reference
         .as_ref()
-        .map(&gps_for)
+        .map(gps_for)
         .filter(|p| p.len() > 1)
         .map(ReferenceCourse::from_points);
     let mut keys = selection.to_vec();
